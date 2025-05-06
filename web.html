@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>SurgeFX Foam Control</title>
+  <style>
+h2 {text-align: center;
+font-size: 42px;}
+p {text-align: center;
+font-size: 42px;}
+div {text-align: center;}
+label {text-align: center;}
+</style>
+</head>
+<body>
+  <h2 style="font-size:8vw;">SurgeFX Foam Control</h2>
+  <p>
+  <label style="font-size:5vw;" for="speed">Amount <br><br></label>
+  <input type="range" style="width: 600px;height:200px;" id="speed" min="0" max="255" value="0" oninput="updateSpeed(this.value)">
+  </p>
+  <p>Current Amount: <span id="currentSpeed">0</span></p>
+  <script>
+    function updateSpeed(value) {
+      fetch(`/setspeed?value=${value}`);
+      document.getElementById('currentSpeed').textContent = value;
+    }
+  </script>
+</body>
+</html>
