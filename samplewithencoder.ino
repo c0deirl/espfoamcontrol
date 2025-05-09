@@ -48,7 +48,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DC Motor Speed Control Web Server</title>
+  <title>SurgeFX Foam Control Web Server</title>
   <style>
     html {font-family: Times New Roman; display: inline-block; text-align: center;}
     h2 {font-size: 2.3rem;}
