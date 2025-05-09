@@ -2,9 +2,16 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <Encoder.h> // Include the Encoder library for rotary encoder support
+#include <Adafruit_SSD1306.h> // OLED display library
 
-const char* ssid = "Your_SSID";
-const char* password = "Your_Password";
+//Hardware Connections
+//OLED Screen:
+
+//Connect SDA to GPIO 21 and SCL to GPIO 22 on the ESP32.
+//Connect the VCC and GND pins of the OLED to 3.3V and GND on the ESP32.
+
+const char* ssid = "SurgeFX_Foam";
+const char* password = "password";
 
 int ENA_pin = 13;
 int IN1 = 5;
@@ -17,13 +24,23 @@ const int resolution = 8;
 
 const char* input_parameter = "value";
 
+// OLED display settings
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws"); // WebSocket endpoint
 
-// Define pins for the rotary encoder
-#define ENCODER_PIN_A 12
-#define ENCODER_PIN_B 14
-
+// Initialize rotary encoder
+//Encoder myEnc(encoderPinA, encoderPinB);
+#define ROTARY_ENCODER_PIN_A 32
+#define ROTARY_ENCODER_PIN_B 33
+#define ROTARY_ENCODER_BUTTON_PIN 21
+#define ROTARY_ENCODER_VCC_PIN -1
+#define ROTARY_ENCODER_STEPS 4
+AiEsp32RotaryEncoder rotaryEncoder = AiEsp32RotaryEncoder(ROTARY_ENCODER_A_PIN, ROTARY_ENCODER_B_PIN, ROTARY_ENCODER_BUTTON_PIN, ROTARY_ENCODER_VCC_PIN, ROTARY_ENCODER_STEPS);
 // Create an Encoder object
 Encoder myEnc(ENCODER_PIN_A, ENCODER_PIN_B);
 
@@ -96,6 +113,23 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType 
   }
 }
 
+// I dont think I need the rotary loop since the main function of reading it is in the main loop now.
+//void rotary_loop()
+//{
+    //dont print anything unless value changed
+//    if (rotaryEncoder.encoderChanged())
+//    {
+//   display.clearDisplay();
+//   Serial.print("Value: ");
+//    Serial.println(rotaryEncoder.readEncoder());
+//    display.setCursor(0, 20); // Line 2
+//    display.print("Speed: ");
+//    display.println(motorSpeed);
+//    display.println(rotaryEncoder.readEncoder());
+//    display.clearDisplay();
+//  }
+//    }
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -110,12 +144,34 @@ void setup() {
   digitalWrite(IN1, LOW);
   digitalWrite(IN2, LOW);
 
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.println("Connecting...");
+   // Initialize OLED display
+   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;); // Don't proceed, loop forever
   }
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
 
+   //we must initialize rotary encoder
+   rotaryEncoder.begin();
+   rotaryEncoder.setup(readEncoderISR);
+   //set boundaries and if values should cycle or not
+   //in this example we will set possible values between 0 and 1000;
+   bool circleValues = false;
+   rotaryEncoder.setBoundaries(0, 255, circleValues); //minValue, maxValue, circleValues true|false (when max go to min and vice versa)
+  
+  // Start the AP, assign "IP" to the listening IP of the web server
+  WiFi.softAPIP();
+  IPAddress IP = WiFi.softAPIP();
+  
+ // Display IP address on OLED
+  display.clearDisplay();
+  display.setCursor(0, 5);
+  display.println(IP);
+  display.display();
+  
   Serial.println(WiFi.localIP());
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -144,14 +200,30 @@ void setup() {
   server.begin();
 }
 
+
+
+void IRAM_ATTR readEncoderISR()
+{
+    rotaryEncoder.readEncoder_ISR();
+}
+
+
 void loop() {
   static int lastValue = 0;
-  int newValue = myEnc.read() / 4; // Adjust sensitivity by dividing by 4
+ // int newValue = myEnc.read() / 4; // Adjust sensitivity by dividing by 4
+  int newValue = rotaryEncoder.readEncoder();
+  
   if (newValue != lastValue) {
     lastValue = newValue;
     slider_value = constrain(newValue, 0, 255); // Constrain slider value between 0 and 255
     ledcWrite(pwm_channel, slider_value);
     notifyClients();
     Serial.println(slider_value);
+    display.setCursor(0, 5);
+    display.println(IP);
+    display.setCursor(0, 50); // Line 2
+    display.print("Speed: ");
+    display.println(slider_value);
+    display.display();
   }
 }
