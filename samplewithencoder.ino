@@ -1,8 +1,10 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
-#include <Encoder.h> // Include the Encoder library for rotary encoder support
+#include <AiEsp32RotaryEncoder.h> 
+//#include <Encoder.h> 
 #include <Adafruit_SSD1306.h> // OLED display library
+#include <Adafruit_GFX.h>
 
 //Hardware Connections
 //OLED Screen:
