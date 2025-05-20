@@ -198,18 +198,25 @@ void setup() {
   // Initialize motor pins
   pinMode(MOTOR_PIN1, OUTPUT);
   pinMode(MOTOR_PIN2, OUTPUT);
-  //ledc Functions are depreciated
+
+//  ledc Functions are depreciated
+
 //  ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
-// ledcAttachPin(MOTOR_EN, PWM_CHANNEL);
-  
-// Connect to an existing WiFi 
+//  ledcAttachPin(MOTOR_EN, PWM_CHANNEL);
+
+// -----------------------------------------------
+    // Connect to an existing WiFi 
+
 //  WiFi.begin(ssid, password);
-// while (WiFi.status() != WL_CONNECTED) {
+//  while (WiFi.status() != WL_CONNECTED) {
 //   delay(500);
 //   Serial.print(".");
 //  }
-  
-    //Start the Wifi Access Point
+// -----------------------------------------------  
+
+
+    // Start the Wifi Access Point
+    // Remove if using an existing WiFi
   WiFi.softAP(ssid, password);
 
   // Display IP on OLED
@@ -241,6 +248,7 @@ void setup() {
 }
 
 // ledc functions are depreciated
+
 //void updateMotor() {
 //  if (speedValue > 0) {
 //    digitalWrite(MOTOR_PIN1, HIGH);
