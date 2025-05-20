@@ -1,0 +1,37 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+  <title>SurgeFX Foam Control</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { text-align: center; font-family: Arial; }
+    .slider { width: 300px; }
+  </style>
+</head>
+<body>
+  <h2>SurgeFX Foam Control</h2>
+  <input type="range" min="0" max="255" value="0" class="slider" id="speedSlider">
+  <p>Speed: <span id="speedValue">0</span></p>
+  <script>
+    var slider = document.getElementById("speedSlider");
+    var output = document.getElementById("speedValue");
+    slider.oninput = function() {
+      output.innerHTML = this.value;
+      var xhr = new XMLHttpRequest();
+      xhr.open("GET", "/speed?value=" + this.value, true);
+      xhr.send();
+    }
+    setInterval(function() {
+      var xhr = new XMLHttpRequest();
+      xhr.onreadystatechange = function() {
+        if (this.readyState == 4 && this.status == 200) {
+          slider.value = this.responseText;
+          output.innerHTML = this.responseText;
+        }
+      };
+      xhr.open("GET", "/getSpeed", true);
+      xhr.send();
+    }, 1000);
+  </script>
+</body>
+</html>
