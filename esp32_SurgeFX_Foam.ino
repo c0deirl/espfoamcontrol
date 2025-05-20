@@ -42,17 +42,115 @@ const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML>
 <html>
 <head>
+  <meta charset="UTF-8">
   <title>SurgeFX Foam Control</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body { text-align: center; font-family: Arial; }
-    .slider { width: 300px; }
-  </style>
+  
+   <style>
+        body { font-family: Arial, sans-serif; background:rgb(46, 46, 46); color: #222; margin: 0; padding: 0;}
+        .container { max-width: 400px; margin: 40px auto; background:rgb(46, 46, 46); border-radius: 8px; box-shadow: 0 2px 8px #ccc; padding: 24px;}
+        h1 { text-align: center; margin-bottom: 0.5em; color:rgb(235, 133, 37);}
+        .reading { font-size: 1.4em; margin: 1em 0; color:rgb(230, 230, 230); text-align: center;}
+        .label { font-weight: bold; margin-bottom: 8px; color:rgb(230, 230, 230); display: block;}
+        .form-group { margin: 16px 0; text-align: center;}
+        input[type="number"] { width: 80px; padding: 0.5em; margin-right: 8px;}
+
+	.slidecontainer {
+	width: 100%; /* Width of the outside container */
+	}
+	
+	/* The slider itself */
+	.slider {
+	-webkit-appearance: none;  /* Override default CSS styles */
+	appearance: none;
+	width: 100%; /* Full-width */
+	height: 50px; /* Specified height */
+	background: #d3d3d3; /* Grey background */
+	outline: none; /* Remove outline */
+	opacity: 0.7; /* Set transparency (for mouse-over effects on hover) */
+	-webkit-transition: .2s; /* 0.2 seconds transition on hover */
+	transition: opacity .2s;
+	}
+
+	/* Mouse-over effects */
+	.slider:hover {
+	opacity: 1; /* Fully shown on mouse-over */
+	}
+
+	/* The slider handle (use -webkit- (Chrome, Opera, Safari, Edge) and -moz- (Firefox) to override default look) */
+	.slider::-webkit-slider-thumb {
+	-webkit-appearance: none; /* Override default look */
+	appearance: none;
+	width: 35px; /* Set a specific slider handle width */
+	height: 50px; /* Slider handle height */
+	background: #04AA6D; /* Green background */
+	cursor: pointer; /* Cursor on hover */
+	}
+
+	.slider::-moz-range-thumb {
+	width: 35px; /* Set a specific slider handle width */
+	height: 50px; /* Slider handle height */
+	background: #04AA6D; /* Green background */
+	cursor: pointer; /* Cursor on hover */
+	}
+        .duration-btns button {
+          background: #2563eb;
+          color: #fff;
+          border: none;
+          border-radius: 4px;
+          padding: 10px 22px;
+          margin: 0 5px;
+          font-size: 1em;
+          cursor: pointer;
+          transition: background 0.2s;
+        }
+        .duration-btns button.selected, .duration-btns button:hover {
+          background: rgb(11, 38, 114);
+		  
+        }
+        .submit-btn {
+          margin-top: 18px;
+          background: #059669;
+          color: #fff;
+          border: none;
+          border-radius: 4px;
+          padding: 10px 28px;
+          font-size: 1em;
+          cursor: pointer;
+          transition: background 0.2s;
+        }
+		a:link, a:visited {
+			
+			color: white;
+			
+			text-align: center;
+			text-decoration: none;
+			}
+
+			a:hover, a:active {
+			background-color: red;
+			}
+        .submit-btn:hover { background: #047857;}
+        .status { margin-top: 18px; text-align: center;}
+        .footer { margin-top: 32px; text-align: center; font-size: 0.95em; color: #888;}
+      </style>
+  
 </head>
 <body>
-  <h2>SurgeFX Foam Control</h2>
-  <input type="range" min="0" max="255" value="0" class="slider" id="speedSlider">
-  <p>Speed: <span id="speedValue">0</span></p>
+  <div class="container">
+  <h1>SurgeFX Foam Control</h1>
+  <div class="reading">
+  <div class="slidecontainer">
+  <input type="range" min="0" max="250" value="0" class="slider" step="10" id="speedSlider" list="ticks">
+  <datalist id="ticks">
+    <option value="50"></option>
+    <option value="100"></option>
+    <option value="150"></option>
+    <option value="250"></option>
+  </datalist>
+  </div>
+    <p>Speed: <span id="speedValue">0</span></p>
+  </div>
   <script>
     var slider = document.getElementById("speedSlider");
     var output = document.getElementById("speedValue");
@@ -74,6 +172,8 @@ const char index_html[] PROGMEM = R"rawliteral(
       xhr.send();
     }, 1000);
   </script>
+   <div class="footer">SurgeFX &copy; 2025</div>
+  </div>
 </body>
 </html>
 )rawliteral";
