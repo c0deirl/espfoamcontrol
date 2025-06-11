@@ -268,6 +268,7 @@ const unsigned char SurgeFX_bmp [] PROGMEM = {
   // Initialize motor pins
   pinMode(MOTOR_PIN1, OUTPUT);
   pinMode(MOTOR_PIN2, OUTPUT);
+  pinMode(MOTOR_EN, OUTPUT);
 
     // Start the Wifi Access Point
     // Remove if using an existing WiFi
@@ -304,8 +305,8 @@ const unsigned char SurgeFX_bmp [] PROGMEM = {
 // Alternative PWM method
 void updateMotor() {
   if (speedValue > 0) {
-    digitalWrite(MOTOR_PIN1, HIGH);
-    digitalWrite(MOTOR_PIN2, LOW);
+    digitalWrite(MOTOR_PIN1, LOW);
+    digitalWrite(MOTOR_PIN2, HIGH);
     analogWrite(MOTOR_EN, speedValue);  // Using analogWrite instead of ledcWrite
   } else {
     digitalWrite(MOTOR_PIN1, LOW);
