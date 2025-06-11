@@ -11,5 +11,7 @@ Additional features will be included such as relay control for a solenoid, to in
 ![Screenshot 2025-06-11 161328](https://github.com/user-attachments/assets/9b3ddf33-8a29-4946-92b0-fe6831305d97)  
 ![PCB2](https://github.com/user-attachments/assets/814d6247-c12e-4a90-af42-5c6c97b74fa3)  
 ![PCB3](https://github.com/user-attachments/assets/71561678-2167-4e50-a5d8-fdf5c034b158)  
+![Screenshot 2025-06-11 161746](https://github.com/user-attachments/assets/40a34985-e53f-4125-acfa-513a10ddabe5)
+
 
 
