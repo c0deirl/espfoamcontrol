@@ -1,278 +1,363 @@
+
 #include <WiFi.h>
-#include <ESPAsyncWebServer.h>
+#include <WebServer.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <ESP32Encoder.h>
+#include "esp32-hal-ledc.h" // Add this line for PWM functions
 
 // WiFi credentials
 const char* ssid = "SurgeFX";
-const char* password = "password123";
+const char* password = "password";
 
-// Motor pins
-#define MOTOR_PIN1 26
-#define MOTOR_PIN2 27
-#define MOTOR_EN   14
+// Pin definitions
+#define MOTOR_PIN1 26  // H-Bridge input 1
+#define MOTOR_PIN2 27  // H-Bridge input 2
+#define MOTOR_EN 14    // H-Bridge enable pin
+#define ENCODER_A 32   // Rotary encoder pin A
+#define ENCODER_B 33   // Rotary encoder pin B
 
-// Encoder pins
-#define ENCODER_A 32
-#define ENCODER_B 33
-#define ENCODER_BTN 25
-
-// OLED config
+// OLED display configuration
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define OLED_RESET    -1
+#define OLED_RESET -1  // Reset pin # (or -1 if sharing Arduino reset pin)
 #define SCREEN_ADDRESS 0x3C
 
-AsyncWebServer server(80);
+// PWM configuration
+#define PWM_CHANNEL 0
+#define PWM_FREQ 5000
+#define PWM_RESOLUTION 8
+
+// Initialize objects
+WebServer server(80);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 ESP32Encoder encoder;
 
-// State variables
-volatile bool motorRunning = false;
-volatile bool toggleRequested = false;
-int motorSpeed = 0; // 0-255
+// Global variables
+int speedValue = 0;
+bool updateDisplay = true;
 
-void updateMotor();
-void updateDisplay();
-void IRAM_ATTR handleEncoderBtn();
-
+// HTML webpage
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML>
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Foam Control</title>
+  <title>SurgeFX Foam Control</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body { font-family: Arial; background: #222; color:#eee; margin:0; padding:0;}
-    .container { max-width: 400px; margin: 40px auto; background: #333; border-radius: 8px; box-shadow: 0 2px 8px #111; padding: 24px;}
-    h1 { text-align: center; color: #ffa500;}
-    .reading { font-size: 1.3em; margin: 1em 0; text-align: center;}
-    .form-group { margin: 20px 0; text-align: center;}
-    button { padding: 12px 36px; margin: 7px; border: none; border-radius:6px; font-size:1em; cursor:pointer;}
-    #startBtn { background: #059669; color:#fff;}
-    #stopBtn { background: #e11d48; color:#fff;}
-    #startBtn:active { background: #047857;}
-    #stopBtn:active { background: #be123c;}
-    .status { text-align:center; margin-top:18px; font-size:1.2em;}
-    .slider { width: 100%; height: 48px; accent-color: #ffa500; }
-    .slider::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 48px;
-      height: 48px;
-      background: #ffa500;
-      border-radius: 50%;
-      cursor: pointer;
-      
-      box-shadow: 0 0 4px #0008;
-    }
-    .slider::-moz-range-thumb {
-      width: 48px;
-      height: 48px;
-      background: #ffa500;
-      
-      cursor: pointer;
-      border: 4px solid #fff;
-      box-shadow: 0 0 4px #0008;
-    }
-    .slider::-ms-thumb {
-      width: 48px;
-      height: 48px;
-      background: #ffa500;
-      border-radius: 50%;
-      cursor: pointer;
-      border: 4px solid #fff;
-      box-shadow: 0 0 4px #0008;
-    }
-    input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; }
-    .slider-group { display: flex; align-items: center; gap: 12px; justify-content: center;}
-    .slider-btn { font-size:2em; width:48px; height:48px; border-radius:50%; border:none; color:#fff; background:#555;}
-    .slider-btn:active { background:#777; }
-  </style>
+  
+   <style>
+        body { font-family: Arial, sans-serif; background:rgb(46, 46, 46); color: #222; margin: 0; padding: 0;}
+        .container { max-width: 400px; margin: 40px auto; background:rgb(46, 46, 46); border-radius: 8px; box-shadow: 0 2px 8px #ccc; padding: 24px;}
+        h1 { text-align: center; margin-bottom: 0.5em; color:rgb(235, 133, 37);}
+        .reading { font-size: 1.4em; margin: 1em 0; color:rgb(230, 230, 230); text-align: center;}
+        .label { font-weight: bold; margin-bottom: 8px; color:rgb(230, 230, 230); display: block;}
+        .form-group { margin: 16px 0; text-align: center;}
+        input[type="number"] { width: 80px; padding: 0.5em; margin-right: 8px;}
+
+	.slidecontainer {
+	width: 100%; /* Width of the outside container */
+	}
+	
+	/* The slider itself */
+	.slider {
+	-webkit-appearance: none;  /* Override default CSS styles */
+	appearance: none;
+	width: 100%; /* Full-width */
+	height: 50px; /* Specified height */
+	background: #d3d3d3; /* Grey background */
+	outline: none; /* Remove outline */
+	opacity: 0.7; /* Set transparency (for mouse-over effects on hover) */
+	-webkit-transition: .2s; /* 0.2 seconds transition on hover */
+	transition: opacity .2s;
+	}
+
+	/* Mouse-over effects */
+	.slider:hover {
+	opacity: 1; /* Fully shown on mouse-over */
+	}
+
+	/* The slider handle (use -webkit- (Chrome, Opera, Safari, Edge) and -moz- (Firefox) to override default look) */
+	.slider::-webkit-slider-thumb {
+	-webkit-appearance: none; /* Override default look */
+	appearance: none;
+	width: 35px; /* Set a specific slider handle width */
+	height: 50px; /* Slider handle height */
+	background: #04AA6D; /* Green background */
+	cursor: pointer; /* Cursor on hover */
+	}
+
+	.slider::-moz-range-thumb {
+	width: 35px; /* Set a specific slider handle width */
+	height: 50px; /* Slider handle height */
+	background: #04AA6D; /* Green background */
+	cursor: pointer; /* Cursor on hover */
+	}
+        .duration-btns button {
+          background: #2563eb;
+          color: #fff;
+          border: none;
+          border-radius: 4px;
+          padding: 10px 22px;
+          margin: 0 5px;
+          font-size: 1em;
+          cursor: pointer;
+          transition: background 0.2s;
+        }
+        .duration-btns button.selected, .duration-btns button:hover {
+          background: rgb(11, 38, 114);
+		  
+        }
+        .submit-btn {
+          margin-top: 18px;
+          background: #059669;
+          color: #fff;
+          border: none;
+          border-radius: 4px;
+          padding: 10px 28px;
+          font-size: 1em;
+          cursor: pointer;
+          transition: background 0.2s;
+        }
+		a:link, a:visited {
+			
+			color: white;
+			
+			text-align: center;
+			text-decoration: none;
+			}
+
+			a:hover, a:active {
+			background-color: red;
+			}
+        .submit-btn:hover { background: #047857;}
+        .status { margin-top: 18px; text-align: center;}
+        .footer { margin-top: 32px; text-align: center; font-size: 0.95em; color: #888;}
+      </style>
+  
 </head>
 <body>
   <div class="container">
-    <h1>Foam Machine Control</h1>
-    <div class="form-group">
-      <label for="speedSlider">Speed: <span id="speedValue">0</span></label>
-      <div class="slider-group">
-        
-        <input type="range" min="0" max="250" value="0" step="10" class="slider" id="speedSlider">
-     
-      </div>
-    </div>
-    <div class="form-group">
-      <button id="startBtn" onclick="startMotor()">Start</button>
-      <button id="stopBtn" onclick="stopMotor()">Stop</button>
-    </div>
-    <div class="status">
-      Status: <span id="motorStatus">Stopped</span>
-    </div>
+  <h1>SurgeFX Foam Control</h1>
+  <div class="reading">
+  <div class="slidecontainer">
+  <input type="range" min="0" max="250" value="0" class="slider" step="10" id="speedSlider" list="ticks">
+  <datalist id="ticks">
+    <option value="50"></option>
+    <option value="100"></option>
+    <option value="150"></option>
+    <option value="250"></option>
+  </datalist>
   </div>
-<script>
-const slider = document.getElementById("speedSlider");
-const output = document.getElementById("speedValue");
-slider.oninput = function() {
-  output.textContent = this.value;
-  fetch('/speed?value=' + this.value, {method:'POST'});
-};
-document.getElementById("plusBtn").onclick = function() {
-  let v = Math.min(parseInt(slider.value) + 5, 255);
-  slider.value = v;
-  slider.oninput();
-};
-document.getElementById("minusBtn").onclick = function() {
-  let v = Math.max(parseInt(slider.value) - 5, 0);
-  slider.value = v;
-  slider.oninput();
-};
-function startMotor() {
-  fetch('/start', {method:'POST'}).then(updateStatus);
-}
-function stopMotor() {
-  fetch('/stop', {method:'POST'}).then(updateStatus);
-}
-function updateStatus() {
-  fetch('/status').then(resp => resp.text()).then(txt => {
-    document.getElementById('motorStatus').textContent = txt;
-  });
-  fetch('/getSpeed').then(resp => resp.text()).then(txt => {
-    slider.value = txt;
-    output.textContent = txt;
-  });
-}
-setInterval(updateStatus, 1000);
-window.onload = updateStatus;
-</script>
+    <p>Speed: <span id="speedValue">0</span></p>
+  </div>
+  <script>
+    var slider = document.getElementById("speedSlider");
+    var output = document.getElementById("speedValue");
+    slider.oninput = function() {
+      output.innerHTML = this.value;
+      var xhr = new XMLHttpRequest();
+      xhr.open("GET", "/speed?value=" + this.value, true);
+      xhr.send();
+    }
+    setInterval(function() {
+      var xhr = new XMLHttpRequest();
+      xhr.onreadystatechange = function() {
+        if (this.readyState == 4 && this.status == 200) {
+          slider.value = this.responseText;
+          output.innerHTML = this.responseText;
+        }
+      };
+      xhr.open("GET", "/getSpeed", true);
+      xhr.send();
+    }, 1000);
+  </script>
+   <div class="footer">SurgeFX &copy; 2025</div>
+  </div>
 </body>
 </html>
 )rawliteral";
 
-// Motor control
+void setup() {
+  Serial.begin(115200);
+  
+  // Define the boot logo
+  // SurgeFX_bmp 64x64px
+const unsigned char SurgeFX_bmp [] PROGMEM = {
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xd8, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x1c, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0xd8, 0x38, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xff, 0xfc, 0x70, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0xf8, 0xff, 0xe1, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x0f, 0xc7, 0xc3, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfc, 0xf0, 0xb9, 0x83, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xf2, 0x23, 0x03, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x90, 0xc6, 0x06, 0x0f, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x41, 0x8c, 0x0c, 0x0f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x1e, 0xdb, 0x18, 0x18, 0x1b, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x1d, 0x26, 0x38, 0x30, 0x34, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x3a, 0x4f, 0x38, 0x62, 0x23, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x74, 0x07, 0x30, 0xc4, 0x46, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0xe8, 0x0e, 0x61, 0x88, 0x8c, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0xe9, 0x1c, 0xc3, 0x18, 0x8c, 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x01, 0xd0, 0x39, 0x86, 0x31, 0x07, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x03, 0xa1, 0x73, 0x8c, 0x72, 0x0f, 0x2e, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x03, 0xa2, 0x33, 0x98, 0xe4, 0x1b, 0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x07, 0x44, 0x77, 0xb1, 0xcc, 0x1f, 0x17, 0xff, 0x80, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x3f, 0xc8, 0x67, 0x63, 0x88, 0x1e, 0x0b, 0xff, 0xf0, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0xcf, 0xfb, 0x87, 0x3f, 0xe7, 0xfe, 0xff, 0xb9, 0xb8, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0xdf, 0xf7, 0x87, 0x3f, 0xe7, 0xfe, 0xff, 0xa3, 0xb0, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0xdc, 0x07, 0x87, 0x70, 0x66, 0x00, 0xe0, 0x26, 0xb0, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0xdf, 0xf7, 0x06, 0x78, 0xee, 0x7e, 0xfe, 0x00, 0x30, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0xcf, 0xfb, 0x0e, 0x7f, 0xee, 0x0c, 0xc0, 0x3f, 0xf0, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x01, 0xc0, 0x7e, 0x0e, 0x77, 0x8e, 0x0d, 0xc0, 0x3f, 0xe0, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x03, 0x1f, 0xf7, 0xfc, 0xf3, 0x8f, 0xfd, 0xff, 0x30, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x0e, 0x7f, 0xf7, 0xfc, 0x73, 0x8f, 0xf9, 0xff, 0x30, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x1c, 0xff, 0xe3, 0xfc, 0x61, 0x8f, 0xf0, 0xfe, 0x30, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x1f, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x40, 0xa1, 0xe0, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x1f, 0xfe, 0x02, 0xc0, 0x02, 0x0c, 0x64, 0xe1, 0xe0, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x80, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x38, 0x03, 0x8c, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x07, 0xcf, 0xec, 0xfc, 0xc7, 0x1c, 0x8f, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x03, 0x46, 0xc8, 0xf9, 0x8f, 0x3b, 0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x03, 0xa9, 0xc9, 0xf3, 0x1e, 0x3e, 0x2e, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x01, 0xb0, 0xd3, 0xc6, 0x1f, 0x1c, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x01, 0xd1, 0xb3, 0x8c, 0x0f, 0x38, 0x5c, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0xeb, 0x27, 0x98, 0x0f, 0xf0, 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x7e, 0x47, 0x30, 0x1e, 0xe0, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x7c, 0x4e, 0x60, 0x39, 0xc1, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x1a, 0xc8, 0xc0, 0x71, 0x82, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x1d, 0x99, 0x81, 0xe3, 0x45, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x33, 0x03, 0xc6, 0x1b, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x26, 0x07, 0x88, 0x67, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x0c, 0x0e, 0x11, 0x9e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x1b, 0x0c, 0x06, 0x7c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x1c, 0x3c, 0xfc, 0x79, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x7f, 0xbf, 0xc7, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x38, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x31, 0xe1, 0xff, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x73, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x67, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x7c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+// Initialize OLED display
+  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;); // Don't proceed, loop forever
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.drawBitmap(0, 0, SurgeFX_bmp, 128, 64, WHITE);
+  display.display();
+
+  // Initialize encoder
+  encoder.attachHalfQuad(ENCODER_A, ENCODER_B);
+  encoder.setCount(0);
+  
+  // Initialize motor pins
+  pinMode(MOTOR_PIN1, OUTPUT);
+  pinMode(MOTOR_PIN2, OUTPUT);
+  pinMode(MOTOR_EN, OUTPUT);
+
+    // Start the Wifi Access Point
+    // Remove if using an existing WiFi
+  WiFi.softAP(ssid, password);
+
+  // Display IP on OLED
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("IP:");
+  display.println(WiFi.softAPIP());
+  display.display();
+  
+  // Setup web server routes
+  server.on("/", HTTP_GET, []() {
+    server.send(200, "text/html", index_html);
+  });
+  
+  server.on("/speed", HTTP_GET, []() {
+    if (server.hasArg("value")) {
+      speedValue = server.arg("value").toInt();
+      updateMotor();
+      updateDisplay = true;
+    }
+    server.send(200, "text/plain", "OK");
+  });
+  
+  server.on("/getSpeed", HTTP_GET, []() {
+    server.send(200, "text/plain", String(speedValue));
+  });
+  
+  server.begin();
+}
+
+// Alternative PWM method
 void updateMotor() {
-  if (motorRunning && motorSpeed > 0) {
+  if (speedValue > 0) {
     digitalWrite(MOTOR_PIN1, LOW);
     digitalWrite(MOTOR_PIN2, HIGH);
-    ledcWrite(0, motorSpeed); // PWM
+    analogWrite(MOTOR_EN, speedValue);  // Using analogWrite instead of ledcWrite
   } else {
     digitalWrite(MOTOR_PIN1, LOW);
     digitalWrite(MOTOR_PIN2, LOW);
-    ledcWrite(0, 0);
+    analogWrite(MOTOR_EN, 0);
   }
 }
 
-// OLED display: show state
-void updateDisplay() {
+void updateOLED() {
   display.clearDisplay();
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.println(motorRunning ? "Running" : "Stopped");
+  
+  // Display IP address
   display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("IP:");
+  display.println(WiFi.softAPIP());
+  
+  // Display speed value
   display.setCursor(0, 32);
   display.print("Speed: ");
-  display.print(motorSpeed);
+  display.println(speedValue);
+  
+  // Draw a progress bar
+  int barWidth = map(speedValue, 0, 255, 0, SCREEN_WIDTH - 4);
+  display.drawRect(0, 50, SCREEN_WIDTH - 2, 10, SSD1306_WHITE);
+  display.fillRect(2, 52, barWidth, 6, SSD1306_WHITE);
+  
   display.display();
-}
-
-// Rotary encoder push button: toggle state
-void IRAM_ATTR handleEncoderBtn() {
-  static uint32_t last_interrupt = 0;
-  uint32_t now = millis();
-  if (now - last_interrupt > 250) { // debounce
-    toggleRequested = true;
-    last_interrupt = now;
-  }
-}
-
-void setup() {
-  Serial.begin(115200);
-
-  // Motor pins
-  pinMode(MOTOR_PIN1, OUTPUT);
-  pinMode(MOTOR_PIN2, OUTPUT);
-  ledcAttachPin(MOTOR_EN, 0);
-  ledcSetup(0, 5000, 8); // channel 0, 5kHz, 8-bit
-
-  // Encoder
-  ESP32Encoder::useInternalWeakPullResistors=UP;
-  encoder.attachHalfQuad(ENCODER_A, ENCODER_B);
-  encoder.setCount(0);
-
-  // Encoder button
-  pinMode(ENCODER_BTN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_BTN), handleEncoderBtn, FALLING);
-
-  // OLED
-  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    while(true);
-  }
-  display.clearDisplay();
-  display.display();
-
-  // WiFi
-  WiFi.softAP(ssid, password);
-  Serial.print("AP IP Address: ");
-  Serial.println(WiFi.softAPIP());
-
-  // Web server
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/html", index_html);
-  });
-  server.on("/start", HTTP_POST, [](AsyncWebServerRequest *request){
-    motorRunning = true;
-    updateMotor();
-    updateDisplay();
-    request->send(200, "text/plain", "Running");
-  });
-  server.on("/stop", HTTP_POST, [](AsyncWebServerRequest *request){
-    motorRunning = false;
-    updateMotor();
-    updateDisplay();
-    request->send(200, "text/plain", "Stopped");
-  });
-  server.on("/speed", HTTP_POST, [](AsyncWebServerRequest *request){
-    if (request->hasParam("value", true)) {
-      motorSpeed = constrain(request->getParam("value", true)->value().toInt(), 0, 255);
-      encoder.setCount(motorSpeed);
-      updateMotor();
-      updateDisplay();
-    }
-    request->send(200, "text/plain", String(motorSpeed));
-  });
-  server.on("/getSpeed", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(200, "text/plain", String(motorSpeed));
-  });
-  server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(200, "text/plain", motorRunning ? "Running" : "Stopped");
-  });
-  server.begin();
-
-  updateMotor();
-  updateDisplay();
 }
 
 void loop() {
-  // Encoder for speed
-  static int32_t lastCount = 0;
-  int32_t count = encoder.getCount();
+  server.handleClient();
+  
+  // Handle encoder
+  static int lastCount = 0;
+  int count = encoder.getCount();
+  
   if (count != lastCount) {
-    motorSpeed = constrain(count, 0, 255);
-    encoder.setCount(motorSpeed); // Prevent rollover
-    lastCount = motorSpeed;
+    speedValue = constrain(count, 0, 255);
+    encoder.setCount(speedValue);
+    lastCount = speedValue;
     updateMotor();
-    updateDisplay();
+    updateDisplay = true;
   }
-
-  // Encoder push button toggles start/stop
-  if (toggleRequested) {
-    motorRunning = !motorRunning;
-    updateMotor();
-    updateDisplay();
-    toggleRequested = false;
+  
+  // Update OLED display
+  if (updateDisplay) {
+    updateOLED();
+    updateDisplay = false;
   }
-
+  
   delay(10);
 }
