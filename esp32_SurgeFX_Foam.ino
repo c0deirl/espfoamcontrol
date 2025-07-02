@@ -6,7 +6,7 @@
 #include <ESP32Encoder.h>
 
 // WiFi credentials
-const char* ssid = "FoamControl";
+const char* ssid = "SurgeFX";
 const char* password = "password123";
 
 // Motor pins
