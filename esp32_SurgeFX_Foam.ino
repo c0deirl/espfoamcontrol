@@ -25,7 +25,6 @@ const char* password = "password123";
 #define OLED_RESET    -1
 #define SCREEN_ADDRESS 0x3C
 
-// Global objects
 AsyncWebServer server(80);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 ESP32Encoder encoder;
@@ -35,12 +34,10 @@ volatile bool motorRunning = false;
 volatile bool toggleRequested = false;
 int motorSpeed = 0; // 0-255
 
-// Function declarations
 void updateMotor();
 void updateDisplay();
 void IRAM_ATTR handleEncoderBtn();
 
-// Web page (with Start/Stop buttons)
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML>
 <html>
@@ -60,7 +57,39 @@ const char index_html[] PROGMEM = R"rawliteral(
     #startBtn:active { background: #047857;}
     #stopBtn:active { background: #be123c;}
     .status { text-align:center; margin-top:18px; font-size:1.2em;}
-    .slider { width: 100%; margin: 20px 0;}
+    .slider { width: 100%; height: 48px; accent-color: #ffa500; }
+    .slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 48px;
+      height: 48px;
+      background: #ffa500;
+      border-radius: 50%;
+      cursor: pointer;
+      border: 4px solid #fff;
+      box-shadow: 0 0 4px #0008;
+    }
+    .slider::-moz-range-thumb {
+      width: 48px;
+      height: 48px;
+      background: #ffa500;
+      border-radius: 50%;
+      cursor: pointer;
+      border: 4px solid #fff;
+      box-shadow: 0 0 4px #0008;
+    }
+    .slider::-ms-thumb {
+      width: 48px;
+      height: 48px;
+      background: #ffa500;
+      border-radius: 50%;
+      cursor: pointer;
+      border: 4px solid #fff;
+      box-shadow: 0 0 4px #0008;
+    }
+    input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; }
+    .slider-group { display: flex; align-items: center; gap: 12px; justify-content: center;}
+    .slider-btn { font-size:2em; width:48px; height:48px; border-radius:50%; border:none; color:#fff; background:#555;}
+    .slider-btn:active { background:#777; }
   </style>
 </head>
 <body>
@@ -68,7 +97,11 @@ const char index_html[] PROGMEM = R"rawliteral(
     <h1>Foam Machine Control</h1>
     <div class="form-group">
       <label for="speedSlider">Speed: <span id="speedValue">0</span></label>
-      <input type="range" min="0" max="255" value="0" class="slider" id="speedSlider">
+      <div class="slider-group">
+        <button type="button" id="minusBtn" class="slider-btn">–</button>
+        <input type="range" min="0" max="255" value="0" class="slider" id="speedSlider">
+        <button type="button" id="plusBtn" class="slider-btn">+</button>
+      </div>
     </div>
     <div class="form-group">
       <button id="startBtn" onclick="startMotor()">Start</button>
@@ -79,19 +112,35 @@ const char index_html[] PROGMEM = R"rawliteral(
     </div>
   </div>
 <script>
+const slider = document.getElementById("speedSlider");
+const output = document.getElementById("speedValue");
+slider.oninput = function() {
+  output.textContent = this.value;
+  fetch('/speed?value=' + this.value, {method:'POST'});
+};
+document.getElementById("plusBtn").onclick = function() {
+  let v = Math.min(parseInt(slider.value) + 5, 255);
+  slider.value = v;
+  slider.oninput();
+};
+document.getElementById("minusBtn").onclick = function() {
+  let v = Math.max(parseInt(slider.value) - 5, 0);
+  slider.value = v;
+  slider.oninput();
+};
 function startMotor() {
   fetch('/start', {method:'POST'}).then(updateStatus);
 }
 function stopMotor() {
   fetch('/stop', {method:'POST'}).then(updateStatus);
 }
-document.getElementById('speedSlider').oninput = function() {
-  document.getElementById('speedValue').textContent = this.value;
-  fetch('/speed?value=' + this.value, {method:'POST'});
-};
 function updateStatus() {
   fetch('/status').then(resp => resp.text()).then(txt => {
     document.getElementById('motorStatus').textContent = txt;
+  });
+  fetch('/getSpeed').then(resp => resp.text()).then(txt => {
+    slider.value = txt;
+    output.textContent = txt;
   });
 }
 setInterval(updateStatus, 1000);
@@ -191,6 +240,9 @@ void setup() {
       updateMotor();
       updateDisplay();
     }
+    request->send(200, "text/plain", String(motorSpeed));
+  });
+  server.on("/getSpeed", HTTP_GET, [](AsyncWebServerRequest *request){
     request->send(200, "text/plain", String(motorSpeed));
   });
   server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
