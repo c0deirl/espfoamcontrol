@@ -65,14 +65,14 @@ const char index_html[] PROGMEM = R"rawliteral(
       background: #ffa500;
       border-radius: 50%;
       cursor: pointer;
-      border: 4px solid #fff;
+      
       box-shadow: 0 0 4px #0008;
     }
     .slider::-moz-range-thumb {
       width: 48px;
       height: 48px;
       background: #ffa500;
-      border-radius: 50%;
+      
       cursor: pointer;
       border: 4px solid #fff;
       box-shadow: 0 0 4px #0008;
@@ -98,9 +98,9 @@ const char index_html[] PROGMEM = R"rawliteral(
     <div class="form-group">
       <label for="speedSlider">Speed: <span id="speedValue">0</span></label>
       <div class="slider-group">
-        <button type="button" id="minusBtn" class="slider-btn">–</button>
-        <input type="range" min="0" max="255" value="0" class="slider" id="speedSlider">
-        <button type="button" id="plusBtn" class="slider-btn">+</button>
+        
+        <input type="range" min="0" max="250" value="0" step="10" class="slider" id="speedSlider">
+     
       </div>
     </div>
     <div class="form-group">
