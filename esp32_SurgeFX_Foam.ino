@@ -154,6 +154,29 @@ const char index_html[] PROGMEM = R"rawliteral(
   </div>
     <p>Speed: <span id="speedValue">0</span></p>
   </div>
+  <div style="display: flex; justify-content: center; margin-top: 24px;">
+  <form action="/stop" method="POST">
+    <button 
+      type="submit" 
+      style="
+        padding: 14px 40px; 
+        background: #e53935; 
+        color: #fff; 
+        border: none; 
+        border-radius: 8px; 
+        font-size: 1.2em; 
+        font-weight: bold; 
+        box-shadow: 0 4px 12px rgba(0,0,0,0.10);
+        cursor: pointer;
+        transition: background 0.2s;
+      "
+      onmouseover="this.style.background='#b71c1c'"
+      onmouseout="this.style.background='#e53935'"
+    >
+      &#x26A0; Stop
+    </button>
+  </form>
+</div>
   <script>
     var slider = document.getElementById("speedSlider");
     var output = document.getElementById("speedValue");
@@ -263,7 +286,7 @@ const unsigned char SurgeFX_bmp [] PROGMEM = {
   display.setTextColor(SSD1306_WHITE);
   display.drawBitmap(0, 0, SurgeFX_bmp, 128, 64, WHITE);
   display.display();
-
+  delay(5000);
   // Initialize encoder
   encoder.attachHalfQuad(ENCODER_A, ENCODER_B);
   encoder.setCount(0);
@@ -302,7 +325,13 @@ const unsigned char SurgeFX_bmp [] PROGMEM = {
   server.on("/getSpeed", HTTP_GET, []() {
     server.send(200, "text/plain", String(speedValue));
   });
-  
+  server.on("/stop", HTTP_POST, []() {
+    speedValue = 0; // Replace setMotorSpeed with your existing function to set the motor speed
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+    updateMotor();
+    updateDisplay = true;
+});
   server.begin();
 }
 
