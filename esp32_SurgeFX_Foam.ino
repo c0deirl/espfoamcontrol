@@ -1,4 +1,3 @@
-
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Wire.h>
@@ -17,6 +16,7 @@ const char* password = "password";
 #define MOTOR_EN 14    // H-Bridge enable pin
 #define ENCODER_A 32   // Rotary encoder pin A
 #define ENCODER_B 33   // Rotary encoder pin B
+#define ENCODER_BTN 25   // Rotary encoder button pin
 
 // OLED display configuration
 #define SCREEN_WIDTH 128
@@ -37,6 +37,8 @@ ESP32Encoder encoder;
 // Global variables
 int speedValue = 0;
 bool updateDisplay = true;
+int lastSpeedValue = 0;
+bool lastButtonState = HIGH;
 
 // HTML webpage
 const char index_html[] PROGMEM = R"rawliteral(
@@ -270,6 +272,7 @@ const unsigned char SurgeFX_bmp [] PROGMEM = {
   pinMode(MOTOR_PIN1, OUTPUT);
   pinMode(MOTOR_PIN2, OUTPUT);
   pinMode(MOTOR_EN, OUTPUT);
+  pinMode(ENCODER_BTN, INPUT_PULLUP);
 
     // Start the Wifi Access Point
     // Remove if using an existing WiFi
@@ -326,7 +329,7 @@ void updateOLED() {
   display.println(WiFi.softAPIP());
   
   // Display speed value
-  display.setCursor(0, 32);
+  display.setCursor(0, 28);
   display.print("Speed: ");
   display.println(speedValue);
   
@@ -334,7 +337,13 @@ void updateOLED() {
   int barWidth = map(speedValue, 0, 255, 0, SCREEN_WIDTH - 4);
   display.drawRect(0, 50, SCREEN_WIDTH - 2, 10, SSD1306_WHITE);
   display.fillRect(2, 52, barWidth, 6, SSD1306_WHITE);
-  
+  // Show status
+  display.setCursor(0, 40);
+  if (speedValue > 0) {
+    display.print("Status: running");
+  } else {
+    display.print("Status: stopped");
+  }
   display.display();
 }
 
@@ -344,7 +353,21 @@ void loop() {
   // Handle encoder
   static int lastCount = 0;
   int count = encoder.getCount();
-  
+  // Handle encoder button press to stop/start motor
+  bool buttonState = digitalRead(ENCODER_BTN);
+  if (lastButtonState == HIGH && buttonState == LOW) { // Button just pressed
+    if (speedValue > 0) {
+      lastSpeedValue = speedValue;   // Save current speed
+      speedValue = 0;
+    } else if (lastSpeedValue > 0) {
+      speedValue = lastSpeedValue;   // Restore last speed
+    }
+    encoder.setCount(speedValue);
+    updateMotor();
+    updateDisplay = true;
+    delay(200); // debounce
+  }
+  lastButtonState = buttonState;
   if (count != lastCount) {
     speedValue = constrain(count, 0, 255);
     encoder.setCount(speedValue);
