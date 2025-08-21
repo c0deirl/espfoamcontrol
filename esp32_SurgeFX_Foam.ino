@@ -1,386 +1,516 @@
+
+
+/*
+  ESP32-2432S028R Motor Control with L298N + LVGL 9.3.0 GUI + Touch + WiFi AP + Web Interface
+  - Uses TFT_eSPI as LVGL display driver & touch input
+  - Web interface matches local GUI dark theme
+  - All in one .ino file
+
+  Prerequisites:
+  - Configure TFT_eSPI User_Setup.h for ESP32-2432S028R + XPT2046 touch (see instructions below)
+  - Install lvgl 9.3.0, TFT_eSPI, AsyncTCP, ESPAsyncWebServer libraries
+
+  Motor Pins (example):
+    IN1 -> GPIO26
+    IN2 -> GPIO27
+    ENA -> GPIO14 (PWM channel 0)
+    IN3 -> GPIO25
+    IN4 -> GPIO33
+    ENB -> GPIO12 (PWM channel 1)
+
+  Touch pins configured in TFT_eSPI User_Setup.h (usually TOUCH_CS=21, TOUCH_IRQ=39)
+*/
+
 #include <WiFi.h>
-#include <WebServer.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
-#include <ESP32Encoder.h>
-#include "esp32-hal-ledc.h" // Add this line for PWM functions
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 
-// WiFi credentials
-const char* ssid = "SurgeFX";
-const char* password = "password";
 
-// Pin definitions
-#define MOTOR_PIN1 26  // H-Bridge input 1
-#define MOTOR_PIN2 27  // H-Bridge input 2
-#define MOTOR_EN 14    // H-Bridge enable pin
-#define ENCODER_A 32   // Rotary encoder pin A
-#define ENCODER_B 33   // Rotary encoder pin B
-#define ENCODER_BTN 25   // Rotary encoder button pin
+#include <TFT_eSPI.h>
+#include <lvgl.h>
+TFT_eSPI tft = TFT_eSPI();
 
-// OLED display configuration
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1  // Reset pin # (or -1 if sharing Arduino reset pin)
-#define SCREEN_ADDRESS 0x3C
+static lv_draw_buf_t draw_buf;
+static lv_color_t buf[LV_HOR_RES_MAX * 40];
 
-// PWM configuration
-#define PWM_CHANNEL 0
-#define PWM_FREQ 5000
-#define PWM_RESOLUTION 8
+// Motor Pins
+const int IN1 = 26;
+const int IN2 = 27;
+const int ENA = 14;
 
-// Initialize objects
-WebServer server(80);
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-ESP32Encoder encoder;
+const int IN3 = 25;
+const int IN4 = 33;
+const int ENB = 12;
 
-// Global variables
-int speedValue = 0;
-bool updateDisplay = true;
-int lastSpeedValue = 0;
-bool lastButtonState = HIGH;
+// PWM config
+const int pwmFreq = 20000;
+const int pwmChannelA = 0;
+const int pwmChannelB = 1;
+const int pwmResolution = 8;
 
-// HTML webpage
+// WiFi AP credentials
+const char* ssid = "ESP32-Motor-Control";
+const char* password = "12345678";
+
+// Async Web Server on port 80
+AsyncWebServer server(80);
+
+// Motor control state
+volatile int motorSpeed = 0; // 0-255
+volatile bool motorDirectionForward = true;
+
+// LVGL Widgets
+lv_obj_t* speed_label;
+lv_obj_t* speed_slider;
+lv_obj_t* dir_forward_btn;
+lv_obj_t* dir_backward_btn;
+
+// Forward declarations
+void setupMotor();
+void updateMotor();
+void handleMotorControl(int speed, bool forward);
+void wifiInit();
+void webServerInit();
+void drawLVGLGUI();
+void slider_event_cb(lv_event_t * e);
+void dir_btn_event_cb(lv_event_t * e);
+bool touchpad_read(lv_indev_drv_t * indev_driver, lv_indev_data_t * data);
+void tft_flush_lvgl(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p);
+
+hw_timer_t * timer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
+void IRAM_ATTR onTimer() {
+  portENTER_CRITICAL_ISR(&timerMux);
+  lv_tick_inc(5);
+  portEXIT_CRITICAL_ISR(&timerMux);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  setupMotor();
+
+  // Setup PWM channels
+  ledcSetup(pwmChannelA, pwmFreq, pwmResolution);
+  ledcAttachPin(ENA, pwmChannelA);
+
+  ledcSetup(pwmChannelB, pwmFreq, pwmResolution);
+  ledcAttachPin(ENB, pwmChannelB);
+
+  tft.init();
+  tft.setRotation(1);
+
+  lv_init();
+
+  lv_draw_buf_init(&draw_buf, buf, NULL, LV_HOR_RES_MAX * 40);
+
+  static lv_disp_drv_t disp_drv;
+  lv_disp_drv_init(&disp_drv);
+  disp_drv.flush_cb = tft_flush_lvgl;
+  disp_drv.draw_buf = &draw_buf;
+  disp_drv.hor_res = 240;
+  disp_drv.ver_res = 320;
+  lv_disp_drv_register(&disp_drv);
+
+  // Register touch input device for LVGL
+  static lv_indev_drv_t indev_drv;
+  lv_indev_drv_init(&indev_drv);
+  indev_drv.type = LV_INDEV_TYPE_POINTER;
+  indev_drv.read_cb = touchpad_read;
+  lv_indev_drv_register(&indev_drv);
+
+  drawLVGLGUI();
+
+  wifiInit();
+  webServerInit();
+
+  updateMotor();
+
+  // Setup LVGL tick timer (5ms)
+  timer = timerBegin(0, 80, true);
+  timerAttachInterrupt(timer, &onTimer);
+  timerAlarmWrite(timer, 5000, true);
+  timerAlarmEnable(timer);
+}
+
+void loop() {
+  lv_task_handler();
+  delay(5);
+}
+
+// Motor setup
+void setupMotor(){
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENA, OUTPUT);
+
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+
+  ledcWrite(pwmChannelA, 0);
+  ledcWrite(pwmChannelB, 0);
+}
+
+// Update motor output pins and PWM
+void updateMotor(){
+  if(motorDirectionForward){
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+  } else {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+  }
+  ledcWrite(pwmChannelA, motorSpeed);
+  ledcWrite(pwmChannelB, motorSpeed);
+}
+
+// Handle motor control from web or local GUI
+void handleMotorControl(int speed, bool forward){
+  if(speed < 0) speed = 0;
+  if(speed > 255) speed = 255;
+
+  motorSpeed = speed;
+  motorDirectionForward = forward;
+  updateMotor();
+
+  // Update LVGL widgets to reflect new state
+  lv_slider_set_value(speed_slider, motorSpeed, LV_ANIM_ON);
+  lv_label_set_text_fmt(speed_label, "Speed: %d", motorSpeed);
+
+  if(motorDirectionForward){
+    lv_obj_add_state(dir_forward_btn, LV_STATE_CHECKED);
+    lv_obj_clear_state(dir_backward_btn, LV_STATE_CHECKED);
+  } else {
+    lv_obj_add_state(dir_backward_btn, LV_STATE_CHECKED);
+    lv_obj_clear_state(dir_forward_btn, LV_STATE_CHECKED);
+  }
+}
+
+void wifiInit(){
+  WiFi.softAP(ssid, password);
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("WiFi AP IP address: ");
+  Serial.println(IP);
+}
+
+void webServerInit(){
+  // Serve main page
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html, processor);
+  });
+
+  // API to control motor: /control?speed=0-255&dir=forward|backward
+  server.on("/control", HTTP_GET, [](AsyncWebServerRequest *request){
+    String speedStr = "0";
+    String dirStr = "forward";
+
+    if(request->hasParam("speed")) speedStr = request->getParam("speed")->value();
+    if(request->hasParam("dir")) dirStr = request->getParam("dir")->value();
+
+    int speed = speedStr.toInt();
+    bool forward = dirStr.equalsIgnoreCase("forward");
+
+    handleMotorControl(speed, forward);
+
+    request->send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+
+  server.begin();
+}
+
+void drawLVGLGUI(){
+  lv_obj_t * scr = lv_scr_act();
+
+  // Background color black
+  lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), LV_PART_MAIN);
+
+  // Title label
+  lv_obj_t* title = lv_label_create(scr);
+  lv_label_set_text(title, "ESP32 Motor Control");
+  lv_obj_set_style_text_color(title, lv_color_hex(0x00BFA5), 0);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+  // Speed label
+  speed_label = lv_label_create(scr);
+  lv_label_set_text_fmt(speed_label, "Speed: %d", motorSpeed);
+  lv_obj_set_style_text_color(speed_label, lv_color_hex(0xC8C8C8), 0);
+  lv_obj_set_style_text_font(speed_label, &lv_font_montserrat_16, 0);
+  lv_obj_align(speed_label, LV_ALIGN_TOP_LEFT, 10, 50);
+
+  // Speed slider
+  speed_slider = lv_slider_create(scr);
+  lv_slider_set_range(speed_slider, 0, 255);
+  lv_slider_set_value(speed_slider, motorSpeed, LV_ANIM_OFF);
+  lv_obj_set_width(speed_slider, 220);
+  lv_obj_align(speed_slider, LV_ALIGN_TOP_LEFT, 10, 75);
+  lv_obj_add_event_cb(speed_slider, slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  // Direction label
+  lv_obj_t* dir_label = lv_label_create(scr);
+  lv_label_set_text(dir_label, "Direction:");
+  lv_obj_set_style_text_color(dir_label, lv_color_hex(0xC8C8C8), 0);
+  lv_obj_set_style_text_font(dir_label, &lv_font_montserrat_16, 0);
+  lv_obj_align(dir_label, LV_ALIGN_TOP_LEFT, 10, 120);
+
+  // Direction buttons container
+  lv_obj_t* btn_container = lv_obj_create(scr);
+  lv_obj_set_size(btn_container, 240, 50);
+  lv_obj_align(btn_container, LV_ALIGN_TOP_LEFT, 10, 145);
+  lv_obj_set_flex_flow(btn_container, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(btn_container, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_bg_color(btn_container, lv_color_black(), 0);
+  lv_obj_set_style_border_width(btn_container, 0, 0);
+
+  // Forward button
+  dir_forward_btn = lv_btn_create(btn_container);
+  lv_obj_set_size(dir_forward_btn, 100, 40);
+  lv_obj_add_state(dir_forward_btn, LV_STATE_CHECKED); // default forward
+  lv_obj_set_style_bg_color(dir_forward_btn, lv_color_hex(0x282828), 0);
+  lv_obj_set_style_bg_color(dir_forward_btn, lv_color_hex(0x00BFA5), LV_STATE_CHECKED);
+  lv_obj_set_style_border_color(dir_forward_btn, lv_color_hex(0x00BFA5), 0);
+  lv_obj_set_style_border_color(dir_forward_btn, lv_color_hex(0x00BFA5), LV_STATE_CHECKED);
+  lv_obj_set_style_border_width(dir_forward_btn, 2, 0);
+  lv_obj_set_style_border_width(dir_forward_btn, 2, LV_STATE_CHECKED);
+  lv_obj_add_event_cb(dir_forward_btn, dir_btn_event_cb, LV_EVENT_CLICKED, (void*)true);
+
+  lv_obj_t* f_label = lv_label_create(dir_forward_btn);
+  lv_label_set_text(f_label, "Forward");
+  lv_obj_center(f_label);
+
+  // Backward button
+  dir_backward_btn = lv_btn_create(btn_container);
+  lv_obj_set_size(dir_backward_btn, 100, 40);
+  lv_obj_set_style_bg_color(dir_backward_btn, lv_color_hex(0x282828), 0);
+  lv_obj_set_style_bg_color(dir_backward_btn, lv_color_hex(0x00BFA5), LV_STATE_CHECKED);
+  lv_obj_set_style_border_color(dir_backward_btn, lv_color_hex(0x00BFA5), 0);
+  lv_obj_set_style_border_color(dir_backward_btn, lv_color_hex(0x00BFA5), LV_STATE_CHECKED);
+  lv_obj_set_style_border_width(dir_backward_btn, 2, 0);
+  lv_obj_set_style_border_width(dir_backward_btn, 2, LV_STATE_CHECKED);
+  lv_obj_add_event_cb(dir_backward_btn, dir_btn_event_cb, LV_EVENT_CLICKED, (void*)false);
+
+  lv_obj_t* b_label = lv_label_create(dir_backward_btn);
+  lv_label_set_text(b_label, "Backward");
+  lv_obj_center(b_label);
+}
+
+// LVGL slider event callback
+void slider_event_cb(lv_event_t * e) {
+  lv_obj_t * slider = (lv_obj_t *)lv_event_get_target(e);
+  int val = lv_slider_get_value(slider);
+
+  motorSpeed = val;
+  lv_label_set_text_fmt(speed_label, "Speed: %d", motorSpeed);
+  updateMotor();
+}
+
+// LVGL direction button event callback
+void dir_btn_event_cb(lv_event_t * e) {
+  lv_obj_t * btn = (lv_obj_t *)lv_event_get_target(e);
+  bool forward = (bool)lv_event_get_user_data(e);
+
+  motorDirectionForward = forward;
+  updateMotor();
+
+  // Update buttons states
+  if(forward){
+    lv_obj_add_state(dir_forward_btn, LV_STATE_CHECKED);
+    lv_obj_clear_state(dir_backward_btn, LV_STATE_CHECKED);
+  } else {
+    lv_obj_add_state(dir_backward_btn, LV_STATE_CHECKED);
+    lv_obj_clear_state(dir_forward_btn, LV_STATE_CHECKED);
+  }
+}
+
+// TFT_eSPI flush callback for LVGL
+void tft_flush_lvgl(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
+  uint32_t w = (area->x2 - area->x1 + 1);
+  uint32_t h = (area->y2 - area->y1 + 1);
+
+  tft.startWrite();
+  tft.setAddrWindow(area->x1, area->y1, w, h);
+  tft.pushColors(&color_p->full, w * h, true);
+  tft.endWrite();
+
+  lv_disp_flush_ready(disp);
+}
+
+// Touchpad read function for LVGL
+bool touchpad_read(lv_indev_drv_t * indev_driver, lv_indev_data_t * data) {
+  uint16_t touchX, touchY;
+
+  if (tft.getTouch(&touchX, &touchY)) {
+    data->state = LV_INDEV_STATE_PR;
+    data->point.x = touchX;
+    data->point.y = touchY;
+  } else {
+    data->state = LV_INDEV_STATE_REL;
+  }
+  return false;
+}
+
+// HTML webpage embedded as PROGMEM string - dark foamdisplay style
 const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>SurgeFX Foam Control</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  
-   <style>
-        body { font-family: Arial, sans-serif; background:rgb(46, 46, 46); color: #222; margin: 0; padding: 0;}
-        .container { max-width: 400px; margin: 40px auto; background:rgb(46, 46, 46); border-radius: 8px; box-shadow: 0 2px 8px #ccc; padding: 24px;}
-        h1 { text-align: center; margin-bottom: 0.5em; color:rgb(235, 133, 37);}
-        .reading { font-size: 1.4em; margin: 1em 0; color:rgb(230, 230, 230); text-align: center;}
-        .label { font-weight: bold; margin-bottom: 8px; color:rgb(230, 230, 230); display: block;}
-        .form-group { margin: 16px 0; text-align: center;}
-        input[type="number"] { width: 80px; padding: 0.5em; margin-right: 8px;}
-
-	.slidecontainer {
-	width: 100%; /* Width of the outside container */
-	}
-	
-	/* The slider itself */
-	.slider {
-	-webkit-appearance: none;  /* Override default CSS styles */
-	appearance: none;
-	width: 100%; /* Full-width */
-	height: 50px; /* Specified height */
-	background: #d3d3d3; /* Grey background */
-	outline: none; /* Remove outline */
-	opacity: 0.7; /* Set transparency (for mouse-over effects on hover) */
-	-webkit-transition: .2s; /* 0.2 seconds transition on hover */
-	transition: opacity .2s;
-	}
-
-	/* Mouse-over effects */
-	.slider:hover {
-	opacity: 1; /* Fully shown on mouse-over */
-	}
-
-	/* The slider handle (use -webkit- (Chrome, Opera, Safari, Edge) and -moz- (Firefox) to override default look) */
-	.slider::-webkit-slider-thumb {
-	-webkit-appearance: none; /* Override default look */
-	appearance: none;
-	width: 35px; /* Set a specific slider handle width */
-	height: 50px; /* Slider handle height */
-	background: #04AA6D; /* Green background */
-	cursor: pointer; /* Cursor on hover */
-	}
-
-	.slider::-moz-range-thumb {
-	width: 35px; /* Set a specific slider handle width */
-	height: 50px; /* Slider handle height */
-	background: #04AA6D; /* Green background */
-	cursor: pointer; /* Cursor on hover */
-	}
-        .duration-btns button {
-          background: #2563eb;
-          color: #fff;
-          border: none;
-          border-radius: 4px;
-          padding: 10px 22px;
-          margin: 0 5px;
-          font-size: 1em;
-          cursor: pointer;
-          transition: background 0.2s;
-        }
-        .duration-btns button.selected, .duration-btns button:hover {
-          background: rgb(11, 38, 114);
-		  
-        }
-        .submit-btn {
-          margin-top: 18px;
-          background: #059669;
-          color: #fff;
-          border: none;
-          border-radius: 4px;
-          padding: 10px 28px;
-          font-size: 1em;
-          cursor: pointer;
-          transition: background 0.2s;
-        }
-		a:link, a:visited {
-			
-			color: white;
-			
-			text-align: center;
-			text-decoration: none;
-			}
-
-			a:hover, a:active {
-			background-color: red;
-			}
-        .submit-btn:hover { background: #047857;}
-        .status { margin-top: 18px; text-align: center;}
-        .footer { margin-top: 32px; text-align: center; font-size: 0.95em; color: #888;}
-      </style>
-  
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ESP32 Motor Control</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+  body {
+    margin: 0; padding: 0;
+    background-color: #000000;
+    color: #c8c8c8;
+    font-family: 'Inter', sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100vh;
+    justify-content: center;
+  }
+  h1 {
+    font-weight: 700;
+    margin-bottom: 1rem;
+    color: #00bfa5;
+  }
+  .slider-container {
+    width: 90vw;
+    max-width: 350px;
+    margin-bottom: 2rem;
+  }
+  .slider-label {
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+  }
+  input[type=range] {
+    -webkit-appearance: none;
+    width: 100%;
+    height: 12px;
+    border-radius: 6px;
+    background: #282828;
+    outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: #00bfa5;
+    cursor: pointer;
+    border: none;
+    margin-top: -8px;
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: #00bfa5;
+    cursor: pointer;
+    border: none;
+  }
+  .direction-container {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+  }
+  .direction-button {
+    background-color: #282828;
+    border: 2px solid #c8c8c8;
+    color: #c8c8c8;
+    padding: 1rem 2rem;
+    border-radius: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.3s, border-color 0.3s;
+  }
+  .direction-button.active {
+    background-color: #00bfa5;
+    border-color: #00bfa5;
+    color: #000;
+  }
+  .speed-display {
+    text-align: center;
+    font-size: 1.5rem;
+    margin-top: -1rem;
+    margin-bottom: 2rem;
+    font-weight: 700;
+  }
+</style>
 </head>
 <body>
-  <div class="container">
-  <h1>SurgeFX Foam Control</h1>
-  <div class="reading">
-  <div class="slidecontainer">
-  <input type="range" min="0" max="250" value="0" class="slider" step="10" id="speedSlider" list="ticks">
-  <datalist id="ticks">
-    <option value="50"></option>
-    <option value="100"></option>
-    <option value="150"></option>
-    <option value="250"></option>
-  </datalist>
-  </div>
-    <p>Speed: <span id="speedValue">0</span></p>
-  </div>
-  <script>
-    var slider = document.getElementById("speedSlider");
-    var output = document.getElementById("speedValue");
-    slider.oninput = function() {
-      output.innerHTML = this.value;
-      var xhr = new XMLHttpRequest();
-      xhr.open("GET", "/speed?value=" + this.value, true);
-      xhr.send();
+<h1>ESP32 Motor Control</h1>
+<div class="slider-container">
+  <label class="slider-label" for="speedRange">Speed</label>
+  <input type="range" min="0" max="255" value="0" id="speedRange" />
+  <div class="speed-display" id="speedValue">0</div>
+</div>
+<div class="direction-container">
+  <div id="forwardBtn" class="direction-button active">Forward</div>
+  <div id="backwardBtn" class="direction-button">Backward</div>
+</div>
+
+<script>
+  const speedRange = document.getElementById('speedRange');
+  const speedValue = document.getElementById('speedValue');
+  const forwardBtn = document.getElementById('forwardBtn');
+  const backwardBtn = document.getElementById('backwardBtn');
+
+  let currentSpeed = 0;
+  let currentDir = 'forward';
+
+  speedRange.oninput = function() {
+    currentSpeed = this.value;
+    speedValue.textContent = currentSpeed;
+    sendControl();
+  };
+
+  forwardBtn.onclick = function() {
+    if(currentDir !== 'forward'){
+      currentDir = 'forward';
+      forwardBtn.classList.add('active');
+      backwardBtn.classList.remove('active');
+      sendControl();
     }
-    setInterval(function() {
-      var xhr = new XMLHttpRequest();
-      xhr.onreadystatechange = function() {
-        if (this.readyState == 4 && this.status == 200) {
-          slider.value = this.responseText;
-          output.innerHTML = this.responseText;
-        }
-      };
-      xhr.open("GET", "/getSpeed", true);
-      xhr.send();
-    }, 1000);
-  </script>
-   <div class="footer">SurgeFX &copy; 2025</div>
-  </div>
+  };
+
+  backwardBtn.onclick = function() {
+    if(currentDir !== 'backward'){
+      currentDir = 'backward';
+      backwardBtn.classList.add('active');
+      forwardBtn.classList.remove('active');
+      sendControl();
+    }
+  };
+
+  function sendControl(){
+    fetch(`/control?speed=${currentSpeed}&dir=${currentDir}`)
+    .then(response => response.json())
+    .then(data => {})
+    .catch(err => {
+      console.error('Error sending control:', err);
+    });
+  }
+</script>
 </body>
 </html>
 )rawliteral";
 
-void setup() {
-  Serial.begin(115200);
-  
-  // Define the boot logo
-  // SurgeFX_bmp 64x64px
-const unsigned char SurgeFX_bmp [] PROGMEM = {
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xd8, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x1c, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0xd8, 0x38, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xff, 0xfc, 0x70, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0xf8, 0xff, 0xe1, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x0f, 0xc7, 0xc3, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfc, 0xf0, 0xb9, 0x83, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xf2, 0x23, 0x03, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x90, 0xc6, 0x06, 0x0f, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x41, 0x8c, 0x0c, 0x0f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x1e, 0xdb, 0x18, 0x18, 0x1b, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x1d, 0x26, 0x38, 0x30, 0x34, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x3a, 0x4f, 0x38, 0x62, 0x23, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x74, 0x07, 0x30, 0xc4, 0x46, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0xe8, 0x0e, 0x61, 0x88, 0x8c, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0xe9, 0x1c, 0xc3, 0x18, 0x8c, 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x01, 0xd0, 0x39, 0x86, 0x31, 0x07, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x03, 0xa1, 0x73, 0x8c, 0x72, 0x0f, 0x2e, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x03, 0xa2, 0x33, 0x98, 0xe4, 0x1b, 0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x07, 0x44, 0x77, 0xb1, 0xcc, 0x1f, 0x17, 0xff, 0x80, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x3f, 0xc8, 0x67, 0x63, 0x88, 0x1e, 0x0b, 0xff, 0xf0, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0xcf, 0xfb, 0x87, 0x3f, 0xe7, 0xfe, 0xff, 0xb9, 0xb8, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0xdf, 0xf7, 0x87, 0x3f, 0xe7, 0xfe, 0xff, 0xa3, 0xb0, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0xdc, 0x07, 0x87, 0x70, 0x66, 0x00, 0xe0, 0x26, 0xb0, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0xdf, 0xf7, 0x06, 0x78, 0xee, 0x7e, 0xfe, 0x00, 0x30, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0xcf, 0xfb, 0x0e, 0x7f, 0xee, 0x0c, 0xc0, 0x3f, 0xf0, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x01, 0xc0, 0x7e, 0x0e, 0x77, 0x8e, 0x0d, 0xc0, 0x3f, 0xe0, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x03, 0x1f, 0xf7, 0xfc, 0xf3, 0x8f, 0xfd, 0xff, 0x30, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x0e, 0x7f, 0xf7, 0xfc, 0x73, 0x8f, 0xf9, 0xff, 0x30, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x1c, 0xff, 0xe3, 0xfc, 0x61, 0x8f, 0xf0, 0xfe, 0x30, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x1f, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x40, 0xa1, 0xe0, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x1f, 0xfe, 0x02, 0xc0, 0x02, 0x0c, 0x64, 0xe1, 0xe0, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x80, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x38, 0x03, 0x8c, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x07, 0xcf, 0xec, 0xfc, 0xc7, 0x1c, 0x8f, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x03, 0x46, 0xc8, 0xf9, 0x8f, 0x3b, 0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x03, 0xa9, 0xc9, 0xf3, 0x1e, 0x3e, 0x2e, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x01, 0xb0, 0xd3, 0xc6, 0x1f, 0x1c, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x01, 0xd1, 0xb3, 0x8c, 0x0f, 0x38, 0x5c, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0xeb, 0x27, 0x98, 0x0f, 0xf0, 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x7e, 0x47, 0x30, 0x1e, 0xe0, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x7c, 0x4e, 0x60, 0x39, 0xc1, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x1a, 0xc8, 0xc0, 0x71, 0x82, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x1d, 0x99, 0x81, 0xe3, 0x45, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x33, 0x03, 0xc6, 0x1b, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x26, 0x07, 0x88, 0x67, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x0c, 0x0e, 0x11, 0x9e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x1b, 0x0c, 0x06, 0x7c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x1c, 0x3c, 0xfc, 0x79, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x7f, 0xbf, 0xc7, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x38, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x31, 0xe1, 0xff, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x73, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x67, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x7c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-};
-
-// Initialize OLED display
-  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    for(;;); // Don't proceed, loop forever
-  }
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.drawBitmap(0, 0, SurgeFX_bmp, 128, 64, WHITE);
-  display.display();
-
-  // Initialize encoder
-  encoder.attachHalfQuad(ENCODER_A, ENCODER_B);
-  encoder.setCount(0);
-  
-  // Initialize motor pins
-  pinMode(MOTOR_PIN1, OUTPUT);
-  pinMode(MOTOR_PIN2, OUTPUT);
-  pinMode(MOTOR_EN, OUTPUT);
-  pinMode(ENCODER_BTN, INPUT_PULLUP);
-
-    // Start the Wifi Access Point
-    // Remove if using an existing WiFi
-  WiFi.softAP(ssid, password);
-
-  // Display IP on OLED
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println("IP:");
-  display.println(WiFi.softAPIP());
-  display.display();
-  
-  // Setup web server routes
-  server.on("/", HTTP_GET, []() {
-    server.send(200, "text/html", index_html);
-  });
-  
-  server.on("/speed", HTTP_GET, []() {
-    if (server.hasArg("value")) {
-      speedValue = server.arg("value").toInt();
-      updateMotor();
-      updateDisplay = true;
-    }
-    server.send(200, "text/plain", "OK");
-  });
-  
-  server.on("/getSpeed", HTTP_GET, []() {
-    server.send(200, "text/plain", String(speedValue));
-  });
-  
-  server.begin();
-}
-
-// Alternative PWM method
-void updateMotor() {
-  if (speedValue > 0) {
-    digitalWrite(MOTOR_PIN1, LOW);
-    digitalWrite(MOTOR_PIN2, HIGH);
-    analogWrite(MOTOR_EN, speedValue);  // Using analogWrite instead of ledcWrite
-  } else {
-    digitalWrite(MOTOR_PIN1, LOW);
-    digitalWrite(MOTOR_PIN2, LOW);
-    analogWrite(MOTOR_EN, 0);
-  }
-}
-
-void updateOLED() {
-  display.clearDisplay();
-  
-  // Display IP address
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println("IP:");
-  display.println(WiFi.softAPIP());
-  
-  // Display speed value
-  display.setCursor(0, 32);
-  display.print("Speed: ");
-  display.println(speedValue);
-  
-  // Draw a progress bar
-  int barWidth = map(speedValue, 0, 255, 0, SCREEN_WIDTH - 4);
-  display.drawRect(0, 50, SCREEN_WIDTH - 2, 10, SSD1306_WHITE);
-  display.fillRect(2, 52, barWidth, 6, SSD1306_WHITE);
-  // Show status
-  display.setCursor(0, 44);
-  if (speedValue > 0) {
-    display.print("Status: running");
-  } else {
-    display.print("Status: stopped");
-  }
-  display.display();
-}
-
-void loop() {
-  server.handleClient();
-  
-  // Handle encoder
-  static int lastCount = 0;
-  int count = encoder.getCount();
-  // Handle encoder button press to stop/start motor
-  bool buttonState = digitalRead(ENCODER_BTN);
-  if (lastButtonState == HIGH && buttonState == LOW) { // Button just pressed
-    if (speedValue > 0) {
-      lastSpeedValue = speedValue;   // Save current speed
-      speedValue = 0;
-    } else if (lastSpeedValue > 0) {
-      speedValue = lastSpeedValue;   // Restore last speed
-    }
-    encoder.setCount(speedValue);
-    updateMotor();
-    updateDisplay = true;
-    delay(200); // debounce
-  }
-  lastButtonState = buttonState;
-  if (count != lastCount) {
-    speedValue = constrain(count, 0, 255);
-    encoder.setCount(speedValue);
-    lastCount = speedValue;
-    updateMotor();
-    updateDisplay = true;
-  }
-  
-  // Update OLED display
-  if (updateDisplay) {
-    updateOLED();
-    updateDisplay = false;
-  }
-  
-  delay(10);
+String processor(const String& var){
+  return String();
 }
