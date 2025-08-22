@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <AsyncWebSocket.h>       // <-- Added for Websockets
 #include <TFT_eSPI.h>             // ILI9341 display driver
 #include <XPT2046_Touchscreen.h>  // Touch controller
 #include "Free_Fonts.h" // Include the header file attached to this sketch
@@ -33,6 +34,7 @@ XPT2046_Touchscreen touchscreen(TOUCH_CS, TOUCH_IRQ);
 int x, y, z;
 
 AsyncWebServer server(80);
+AsyncWebSocket ws("/ws"); // <-- Websocket endpoint
 
 // Colors (565 format)
 #define COLOR_BG          0x0000  // Dark gray blue (#313d54 approx)
@@ -79,9 +81,38 @@ bool motorOn = false;
 uint8_t motorSpeed = 0;  // 0-100%
 //bool blowerOn = true;
 bool foamMachineOn = false;
-bool blackLightsOn = true;
+bool blackLightsOn = false;
 
 IPAddress AP_IP;
+
+// --- WebSocket event handler ---
+void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, 
+               AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    Serial.printf("WebSocket client #%u connected\n", client->id());
+    // Optionally send initial state
+    String json = "{";
+    json += "\"motorOn\":" + String(motorOn ? "true" : "false") + ",";
+    json += "\"motorSpeed\":" + String(motorSpeed) + ",";
+    json += "\"foamMachineOn\":" + String(foamMachineOn ? "true" : "false") + ",";
+    json += "\"blackLightsOn\":" + String(blackLightsOn ? "true" : "false");
+    json += "}";
+    client->text(json);
+  }
+  // You can handle received data here if you want two-way sync from web
+  // (e.g., if user changes from web, but you already have HTTP handlers for that)
+}
+
+// --- Notify all websocket clients of current state ---
+void notifyClients() {
+  String json = "{";
+  json += "\"motorOn\":" + String(motorOn ? "true" : "false") + ",";
+  json += "\"motorSpeed\":" + String(motorSpeed) + ",";
+  json += "\"foamMachineOn\":" + String(foamMachineOn ? "true" : "false") + ",";
+  json += "\"blackLightsOn\":" + String(blackLightsOn ? "true" : "false");
+  json += "}";
+  ws.textAll(json);
+}
 
 void setup() {
   Serial.begin(115200);
@@ -96,8 +127,6 @@ void setup() {
   // Blower pin setup
   //pinMode(BLOWER_PIN, OUTPUT);
  // digitalWrite(BLOWER_PIN, blowerOn ? HIGH : LOW);
-
-
 
   // Initialize display and touchscreen
   tft.init();
@@ -117,7 +146,7 @@ void setup() {
   Serial.print("AP IP address: ");
   Serial.println(WiFi.softAPIP());
   IPAddress IP = WiFi.softAPIP(); 
-drawGUI();
+  drawGUI();
 
   // Define web server routes
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
@@ -130,7 +159,6 @@ drawGUI();
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ESP32 Motor Control</title>
   <style>
-    
     body {
   margin: 0; padding: 20px;
   background: #2f3b4d;
@@ -287,9 +315,10 @@ drawGUI();
     <div class="speed-display" id="speedDisplay">0%</div>
     <input type="range" id="speedSlider" min="0" max="100" value="0" step="1" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Pump speed control" />
     <div class="buttons-row" role="group" aria-label="Control buttons">
-      <button id="blowerBtn" class="btn on" aria-pressed="true" aria-label="Blower toggle">
+           
+      <button id="foamBtn" class="btn on" aria-pressed="true" aria-label="Foam toggle">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="5" x2="12" y2="12"/></svg>
-        Blower
+        Foam
       </button>
       
       <button id="blackBtn" class="btn on" aria-pressed="true" aria-label="Black lights toggle">
@@ -312,6 +341,18 @@ drawGUI();
     let blowerOn = false;
     let foamOn = false;
     let blackOn = false;
+
+    // --- WebSocket live sync ---
+    const ws = new WebSocket(`ws://${window.location.hostname}/ws`);
+    ws.onmessage = function(event) {
+      const data = JSON.parse(event.data);
+      speedDisplay.textContent = `${data.motorSpeed}%`;
+      speedSlider.value = data.motorSpeed;
+      toggleButton(powerBtn, data.motorOn);
+      // toggleButton(blowerBtn, data.blowerOn); // Only if you support blower sync
+      toggleButton(foamBtn, data.foamMachineOn);
+      toggleButton(blackBtn, data.blackLightsOn);
+    };
 
     function updateSpeed(val) {
       speedDisplay.textContent = `${val}%`;
@@ -372,6 +413,7 @@ drawGUI();
       updateMotor();
       drawSpeedValue(motorSpeed);
       drawSlider(motorSpeed);
+      notifyClients(); // <-- Websocket broadcast
     }
     request->send(200, "text/plain", "OK");
   });
@@ -381,15 +423,16 @@ drawGUI();
       motorOn = (request->getParam("state")->value() == "on");
       updateMotor();
       drawPowerButton(motorOn);
+      notifyClients(); // <-- Websocket broadcast
     }
     request->send(200, "text/plain", "OK");
   });
-
 
   server.on("/setFoam", HTTP_GET, [](AsyncWebServerRequest *request){
     if (request->hasParam("state")) {
       foamMachineOn = (request->getParam("state")->value() == "on");
       drawBottomButton(BTN_FOAM_X, foamMachineOn, "");
+      notifyClients(); // <-- Websocket broadcast
     }
     request->send(200, "text/plain", "OK");
   });
@@ -397,9 +440,14 @@ drawGUI();
     if (request->hasParam("state")) {
       blackLightsOn = (request->getParam("state")->value() == "on");
       drawBottomButton(BTN_BLKL_X, blackLightsOn, "");
+      notifyClients(); // <-- Websocket broadcast
     }
     request->send(200, "text/plain", "OK");
   });
+
+  // WebSocket endpoint
+  ws.onEvent(onWsEvent);
+  server.addHandler(&ws);
 
   server.begin();
   Serial.println("HTTP server ready");
@@ -412,53 +460,23 @@ void loop() {
 
   if (touchscreen.tirqTouched() && touchscreen.touched()) {
 
-  if (touchscreen.touched()) {
-    if (millis() - lastTouchTime < 200) return; // 200ms debounce
-    lastTouchTime = millis();
+    if (touchscreen.touched()) {
+      if (millis() - lastTouchTime < 200) return; // 200ms debounce
+      lastTouchTime = millis();
 
-    TS_Point p = touchscreen.getPoint();
+      TS_Point p = touchscreen.getPoint();
 
-    int x = map(p.x, 200, 3700, 1, tft.width() - 1);
-    int y = map(p.y, 240, 3800, 1, tft.height() - 1);
+      int x = map(p.x, 200, 3700, 1, tft.width() - 1);
+      int y = map(p.y, 240, 3800, 1, tft.height() - 1);
 
-   // x = constrain(x, 0, tft.width() - 1);
-   // y = constrain(y, 0, tft.height() - 1);
+      Serial.printf("Touch %d,%d\n", x, y);
 
-    Serial.printf("Touch %d,%d\n", x, y);
-
-    // Instead of redrawing whole screen, just print touch detected
-    //tft.fillCircle(x, y, 5, TFT_RED);
-
-    // Comment out or simplify handleTouch() to minimal toggle code and GUI update
-
-    handleTouch(x, y);
-    delay(200);
+      handleTouch(x, y);
+      delay(200);
+    }
   }
+  ws.cleanupClients(); // <-- Clean up disconnected clients
 }
-}
-//void loop() {
-
-  // Read IRQ pin state (active low means touched)
-//  bool irqState = digitalRead(TOUCH_IRQ) == LOW;
-//  Serial.printf("IRQ pin (touch detected): %d\n", irqState);
-//if (touchscreen.tirqTouched() && touchscreen.touched()) {
-//  if (irqState) {
-//    TS_Point p = touchscreen.getPoint();
-
-//    int x = map(p.y, 2000, 38000, 0, tft.width() - 1);
-//    int y = map(p.x, 2000, 38000, 0, tft.height() - 1);
-//    x = constrain(x, 0, tft.width()-1);
-//    y = constrain(y, 0, tft.height()-1);
-
-//    Serial.printf("Touch at %d,%d\n", x, y);
-
-//    handleTouch(x, y);
-//    delay(200);
-//  }
-
-//  delay(10);
-//}
-//}
 
 unsigned long lastUpdate = 0;
 const unsigned long updateInterval = 100; // ms
@@ -473,6 +491,7 @@ void handleTouch(int x, int y) {
     motorOn = !motorOn;
     updateMotor();
     drawPowerButton(motorOn);
+    notifyClients(); // <-- Websocket broadcast
     return;
   }
 
@@ -483,6 +502,7 @@ void handleTouch(int x, int y) {
     updateMotor();
     drawSpeedValue(motorSpeed);
     drawSlider(motorSpeed);
+    notifyClients(); // <-- Websocket broadcast
     return;
   }
 
@@ -491,11 +511,13 @@ void handleTouch(int x, int y) {
   if (pointInRect(x, y, BTN_FOAM_X, BTN_BTNS_Y, BTN_BTN_W, BTN_BTN_H)) {
     foamMachineOn = !foamMachineOn;
     drawBottomButton(BTN_FOAM_X, foamMachineOn, "");
+    notifyClients(); // <-- Websocket broadcast
     return;
   }
   if (pointInRect(x, y, BTN_BLKL_X, BTN_BTNS_Y, BTN_BTN_W, BTN_BTN_H)) {
     blackLightsOn = !blackLightsOn;
     drawBottomButton(BTN_BLKL_X, blackLightsOn, "");
+    notifyClients(); // <-- Websocket broadcast
     return;
   }
 }
@@ -507,6 +529,7 @@ void drawGUI() {
   drawTitle();
   drawSpeedValue(motorSpeed);
   drawSlider(motorSpeed);
+  tft.setTextSize(1);
   drawBottomButton(BTN_FOAM_X, foamMachineOn, "");
   drawBottomButton(BTN_BLKL_X, blackLightsOn, "");
 }
@@ -530,7 +553,6 @@ void drawTime() {
 }
 
 void drawTitle() {
- // tft.setFreeFont(FF19);
   tft.setFreeFont(MYFONT32);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(COLOR_TEXT);
@@ -544,7 +566,6 @@ void drawSpeedValue(uint8_t speed) {
   // Cyan speed text
   tft.setTextDatum(MC_DATUM);
   tft.setFreeFont(FF31);
-  //tft.setTextColor(COLOR_ACCENT, COLOR_BLACK);
   tft.setTextColor(COLOR_ACCENT);
   tft.setTextSize(1);
   char buf[8];
@@ -578,9 +599,10 @@ void drawBottomButton(int x, bool on, const char* label) {
 
   // Label
   tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(FF31);
   tft.setTextColor(fg);
-  tft.setTextSize(2);
-  tft.drawString(label, cx, BTN_BTNS_Y + 40);
+  tft.setTextSize(1);
+  tft.drawString(label, cx, BTN_BTNS_Y + 10);
 }
 
 bool pointInCircle(int px, int py, int cx, int cy, int r) {
@@ -605,4 +627,3 @@ void updateMotor() {
     ledcWrite(0, 0);
   }
 }
-
