@@ -1,516 +1,608 @@
-
-
-/*
-  ESP32-2432S028R Motor Control with L298N + LVGL 9.3.0 GUI + Touch + WiFi AP + Web Interface
-  - Uses TFT_eSPI as LVGL display driver & touch input
-  - Web interface matches local GUI dark theme
-  - All in one .ino file
-
-  Prerequisites:
-  - Configure TFT_eSPI User_Setup.h for ESP32-2432S028R + XPT2046 touch (see instructions below)
-  - Install lvgl 9.3.0, TFT_eSPI, AsyncTCP, ESPAsyncWebServer libraries
-
-  Motor Pins (example):
-    IN1 -> GPIO26
-    IN2 -> GPIO27
-    ENA -> GPIO14 (PWM channel 0)
-    IN3 -> GPIO25
-    IN4 -> GPIO33
-    ENB -> GPIO12 (PWM channel 1)
-
-  Touch pins configured in TFT_eSPI User_Setup.h (usually TOUCH_CS=21, TOUCH_IRQ=39)
-*/
-
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <TFT_eSPI.h>             // ILI9341 display driver
+#include <XPT2046_Touchscreen.h>  // Touch controller
+#include "Free_Fonts.h" // Include the header file attached to this sketch
+#include "GlitchGoblin_2O87v20pt7b.h"
 
+// Pin definitions — adjust as necessary for your wiring
+#define MOTOR_PWM_PIN 35
+#define MOTOR_IN1_PIN 16
+#define MOTOR_IN2_PIN 17
+//#define BLOWER_PIN    17
 
-#include <TFT_eSPI.h>
-#include <lvgl.h>
-TFT_eSPI tft = TFT_eSPI();
+#define MYFONT32 &GlitchGoblin_2O87v20pt7b
 
-static lv_draw_buf_t draw_buf;
-static lv_color_t buf[LV_HOR_RES_MAX * 40];
+// Touchscreen pins
+#define XPT2046_IRQ 36   // T_IRQ
+#define XPT2046_MOSI 32  // T_DIN
+#define XPT2046_MISO 39  // T_OUT
+#define XPT2046_CLK 25   // T_CLK
+#define XPT2046_CS 33    // T_CS
 
-// Motor Pins
-const int IN1 = 26;
-const int IN2 = 27;
-const int ENA = 14;
+#define TOUCH_CS     33
+#define TOUCH_IRQ    36
 
-const int IN3 = 25;
-const int IN4 = 33;
-const int ENB = 12;
-
-// PWM config
-const int pwmFreq = 20000;
-const int pwmChannelA = 0;
-const int pwmChannelB = 1;
-const int pwmResolution = 8;
-
-// WiFi AP credentials
-const char* ssid = "ESP32-Motor-Control";
+const char* ssid = "ESP32_MotorControl";
 const char* password = "12345678";
 
-// Async Web Server on port 80
+SPIClass touchscreenSPI = SPIClass(VSPI);
+TFT_eSPI tft = TFT_eSPI();
+XPT2046_Touchscreen touchscreen(TOUCH_CS, TOUCH_IRQ);
+int x, y, z;
+
 AsyncWebServer server(80);
 
-// Motor control state
-volatile int motorSpeed = 0; // 0-255
-volatile bool motorDirectionForward = true;
+// Colors (565 format)
+#define COLOR_BG          0x0000  // Dark gray blue (#313d54 approx)
+#define COLOR_ACCENT      0x4EDB     // Cyan  (#00ffff)
+#define COLOR_BTN_OFF     0x10a2     // Gray (#7f8c8d)
+#define COLOR_TEXT        0xFFFF     // White
+#define COLOR_TEXT_ACC    COLOR_ACCENT
+#define COLOR_BLACK       0x0000
+#define COLOR_RED         0x8000
+#define COLOR_GREEN       0x03e0
 
-// LVGL Widgets
-lv_obj_t* speed_label;
-lv_obj_t* speed_slider;
-lv_obj_t* dir_forward_btn;
-lv_obj_t* dir_backward_btn;
+// Layout constants matching your image
+#define BTN_RADIUS         30
 
-// Forward declarations
-void setupMotor();
-void updateMotor();
-void handleMotorControl(int speed, bool forward);
-void wifiInit();
-void webServerInit();
-void drawLVGLGUI();
-void slider_event_cb(lv_event_t * e);
-void dir_btn_event_cb(lv_event_t * e);
-bool touchpad_read(lv_indev_drv_t * indev_driver, lv_indev_data_t * data);
-void tft_flush_lvgl(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p);
+#define BTN_POWER_X        40
+#define BTN_POWER_Y        95
 
-hw_timer_t * timer = NULL;
-portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+#define TIME_X             160
+#define TIME_Y             60
 
-void IRAM_ATTR onTimer() {
-  portENTER_CRITICAL_ISR(&timerMux);
-  lv_tick_inc(5);
-  portEXIT_CRITICAL_ISR(&timerMux);
-}
+#define TITLE_X            165
+#define TITLE_Y            25
+
+#define SPEED_BOX_X        100
+#define SPEED_BOX_Y        80
+#define SPEED_BOX_W        120
+#define SPEED_BOX_H        60
+
+#define SLIDER_X           40
+#define SLIDER_Y           150
+#define SLIDER_W           250
+#define SLIDER_H           30
+
+#define BTN_BLWR_X         40
+#define BTN_FOAM_X         40
+#define BTN_BLKL_X         220
+#define BTN_BTNS_Y         200
+#define BTN_BTN_W          70
+#define BTN_BTN_H          50
+#define BTN_BTN_RADIUS     10
+
+// Device states
+bool motorOn = false;
+uint8_t motorSpeed = 0;  // 0-100%
+//bool blowerOn = true;
+bool foamMachineOn = false;
+bool blackLightsOn = true;
+
+IPAddress AP_IP;
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
 
-  setupMotor();
+  // Setup motor control pins and PWM channel 0
+  pinMode(MOTOR_IN1_PIN, OUTPUT);
+  pinMode(MOTOR_IN2_PIN, OUTPUT);
+  ledcSetup(0, 20000, 8);  // 20 kHz, 8-bit
+  ledcAttachPin(MOTOR_PWM_PIN, 0);
+  pinMode(TOUCH_IRQ, INPUT_PULLUP);
 
-  // Setup PWM channels
-  ledcSetup(pwmChannelA, pwmFreq, pwmResolution);
-  ledcAttachPin(ENA, pwmChannelA);
+  // Blower pin setup
+  //pinMode(BLOWER_PIN, OUTPUT);
+ // digitalWrite(BLOWER_PIN, blowerOn ? HIGH : LOW);
 
-  ledcSetup(pwmChannelB, pwmFreq, pwmResolution);
-  ledcAttachPin(ENB, pwmChannelB);
 
+
+  // Initialize display and touchscreen
   tft.init();
   tft.setRotation(1);
+  tft.fillScreen(COLOR_BG);
 
-  lv_init();
+ // touch.begin();
+ touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
+ touchscreen.begin(touchscreenSPI);
+ // touch.setRotation(1);
+ // Set the Touchscreen rotation in landscape mode
+  // Note: in some displays, the touchscreen might be upside down, so you might need to set the rotation to 3: touchscreen.setRotation(3);
+  touchscreen.setRotation(1);
 
-  lv_draw_buf_init(&draw_buf, buf, NULL, LV_HOR_RES_MAX * 40);
-
-  static lv_disp_drv_t disp_drv;
-  lv_disp_drv_init(&disp_drv);
-  disp_drv.flush_cb = tft_flush_lvgl;
-  disp_drv.draw_buf = &draw_buf;
-  disp_drv.hor_res = 240;
-  disp_drv.ver_res = 320;
-  lv_disp_drv_register(&disp_drv);
-
-  // Register touch input device for LVGL
-  static lv_indev_drv_t indev_drv;
-  lv_indev_drv_init(&indev_drv);
-  indev_drv.type = LV_INDEV_TYPE_POINTER;
-  indev_drv.read_cb = touchpad_read;
-  lv_indev_drv_register(&indev_drv);
-
-  drawLVGLGUI();
-
-  wifiInit();
-  webServerInit();
-
-  updateMotor();
-
-  // Setup LVGL tick timer (5ms)
-  timer = timerBegin(0, 80, true);
-  timerAttachInterrupt(timer, &onTimer);
-  timerAlarmWrite(timer, 5000, true);
-  timerAlarmEnable(timer);
-}
-
-void loop() {
-  lv_task_handler();
-  delay(5);
-}
-
-// Motor setup
-void setupMotor(){
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(ENA, OUTPUT);
-
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
-  pinMode(ENB, OUTPUT);
-
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, LOW);
-
-  ledcWrite(pwmChannelA, 0);
-  ledcWrite(pwmChannelB, 0);
-}
-
-// Update motor output pins and PWM
-void updateMotor(){
-  if(motorDirectionForward){
-    digitalWrite(IN1, HIGH);
-    digitalWrite(IN2, LOW);
-    digitalWrite(IN3, HIGH);
-    digitalWrite(IN4, LOW);
-  } else {
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, HIGH);
-    digitalWrite(IN3, LOW);
-    digitalWrite(IN4, HIGH);
-  }
-  ledcWrite(pwmChannelA, motorSpeed);
-  ledcWrite(pwmChannelB, motorSpeed);
-}
-
-// Handle motor control from web or local GUI
-void handleMotorControl(int speed, bool forward){
-  if(speed < 0) speed = 0;
-  if(speed > 255) speed = 255;
-
-  motorSpeed = speed;
-  motorDirectionForward = forward;
-  updateMotor();
-
-  // Update LVGL widgets to reflect new state
-  lv_slider_set_value(speed_slider, motorSpeed, LV_ANIM_ON);
-  lv_label_set_text_fmt(speed_label, "Speed: %d", motorSpeed);
-
-  if(motorDirectionForward){
-    lv_obj_add_state(dir_forward_btn, LV_STATE_CHECKED);
-    lv_obj_clear_state(dir_backward_btn, LV_STATE_CHECKED);
-  } else {
-    lv_obj_add_state(dir_backward_btn, LV_STATE_CHECKED);
-    lv_obj_clear_state(dir_forward_btn, LV_STATE_CHECKED);
-  }
-}
-
-void wifiInit(){
+  // Start WiFi access point
   WiFi.softAP(ssid, password);
-  IPAddress IP = WiFi.softAPIP();
-  Serial.print("WiFi AP IP address: ");
-  Serial.println(IP);
-}
+  Serial.print("AP IP address: ");
+  Serial.println(WiFi.softAPIP());
+  IPAddress IP = WiFi.softAPIP(); 
+drawGUI();
 
-void webServerInit(){
-  // Serve main page
+  // Define web server routes
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/html", index_html, processor);
+    // Simple placeholder web GUI; please expand as needed
+    request->send(200, "text/html", R"rawliteral(
+      <!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ESP32 Motor Control</title>
+  <style>
+    
+    body {
+  margin: 0; padding: 20px;
+  background: #2f3b4d;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
+               Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+  color: #ccd6f6;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+}
+    .card {
+      background: #38435b;
+      border-radius: 16px;
+      box-shadow: 0 8px 16px rgba(0,0,0,0.5);
+      padding: 24px;
+      width: 360px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      user-select: none;
+    }
+    .top-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .time {
+      font-weight: 500;
+      font-size: 14px;
+      color: #8a94a6;
+    }
+    .settings-icon {
+      width: 24px; height: 24px;
+      fill: #8a94a6;
+      cursor: pointer;
+    }
+    h1 {
+      font-size: 22px;
+      margin: 8px 0 16px 0;
+      text-align: center;
+      font-weight: 700;
+      color: #e6f0ff;
+    }
+    .speed-display {
+      background: #000;
+      border-radius: 8px;
+      padding: 16px 0;
+      width: 120px;
+      margin: 0 auto 24px auto;
+      box-shadow: inset 0 -4px 6px rgba(0,0,0,0.7);
+      font-size: 48px;
+      font-weight: 700;
+      color: #00ffff;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+    input[type=range] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 12px;
+      background: #19222e;
+      border-radius: 6px;
+      outline: none;
+      margin-bottom: 24px;
+      cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 28px;
+      height: 28px;
+      background: #00ffff;
+      border-radius: 50%;
+      cursor: pointer;
+      box-shadow: 0 0 8px #00ffffcc;
+      transition: background 0.3s ease;
+      margin-top: -8px; /* center thumb vertically */
+      border: none;
+    }
+    input[type=range]:active::-webkit-slider-thumb {
+      background: #00cccc;
+      box-shadow: 0 0 12px #00cccccc;
+    }
+    input[type=range]::-moz-range-thumb {
+      width: 28px;
+      height: 28px;
+      background: #00ffff;
+      border-radius: 50%;
+      cursor: pointer;
+      border: none;
+      box-shadow: 0 0 8px #00ffffcc;
+      transition: background 0.3s ease;
+    }
+    input[type=range]:active::-moz-range-thumb {
+      background: #00cccc;
+      box-shadow: 0 0 12px #00cccccc;
+    }
+    .buttons-row {
+      display: flex;
+      justify-content: space-between;
+    }
+    .btn {
+      flex-grow: 1;
+      margin: 0 6px;
+      padding: 12px 0;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 16px;
+      cursor: pointer;
+      color: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      user-select: none;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+      transition: background-color 0.3s ease;
+      border: none;
+      outline: none;
+    }
+    .btn svg {
+      width: 20px;
+      height: 20px;
+      margin-bottom: 6px;
+      stroke-width: 2;
+      stroke: currentColor;
+      fill: none;
+    }
+    .btn.on {
+      background-color: #00ffff;
+      color: #000;
+    }
+    .btn.off {
+      background-color: #7f8c8d;
+      color: #ddd;
+    }
+    .btn:first-child {
+      margin-left: 0;
+    }
+    .btn:last-child {
+      margin-right: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="card" role="main" aria-label="Pump control panel">
+    <div class="top-bar">
+      <button id="powerBtn" class="btn on" aria-pressed="true" aria-label="Motor power toggle" title="Power">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="5" x2="12" y2="12"/></svg>
+      </button>
+    </div>
+    <h1>SurgeFX Pump Speed</h1>
+    <div class="speed-display" id="speedDisplay">0%</div>
+    <input type="range" id="speedSlider" min="0" max="100" value="0" step="1" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Pump speed control" />
+    <div class="buttons-row" role="group" aria-label="Control buttons">
+      <button id="blowerBtn" class="btn on" aria-pressed="true" aria-label="Blower toggle">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="5" x2="12" y2="12"/></svg>
+        Blower
+      </button>
+      
+      <button id="blackBtn" class="btn on" aria-pressed="true" aria-label="Black lights toggle">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="5" x2="12" y2="12"/></svg>
+        Lights
+      </button>
+    </div>
+  </div>
+
+  <script>
+    const speedDisplay = document.getElementById('speedDisplay');
+    const speedSlider = document.getElementById('speedSlider');
+    const powerBtn = document.getElementById('powerBtn');
+    const blowerBtn = document.getElementById('blowerBtn');
+    const foamBtn = document.getElementById('foamBtn');
+    const blackBtn = document.getElementById('blackBtn');
+
+    // Initial states
+    let motorOn = false;
+    let blowerOn = false;
+    let foamOn = false;
+    let blackOn = false;
+
+    function updateSpeed(val) {
+      speedDisplay.textContent = `${val}%`;
+      speedSlider.setAttribute('aria-valuenow', val);
+      fetch(`/setSpeed?val=${val}`).catch(() => {});
+    }
+
+    function toggleButton(button, flag) {
+      if (flag) {
+        button.classList.add('on');
+        button.classList.remove('off');
+        button.setAttribute('aria-pressed', 'true');
+      } else {
+        button.classList.add('off');
+        button.classList.remove('on');
+        button.setAttribute('aria-pressed', 'false');
+      }
+    }
+
+    speedSlider.addEventListener('input', (e) => {
+      updateSpeed(e.target.value);
+    });
+
+    powerBtn.addEventListener('click', () => {
+      motorOn = !motorOn;
+      toggleButton(powerBtn, motorOn);
+      fetch(`/setMotor?state=${motorOn ? 'on' : 'off'}`).catch(() => {});
+    });
+
+    blowerBtn.addEventListener('click', () => {
+      blowerOn = !blowerOn;
+      toggleButton(blowerBtn, blowerOn);
+      fetch(`/setBlower?state=${blowerOn ? 'on' : 'off'}`).catch(() => {});
+    });
+
+    foamBtn.addEventListener('click', () => {
+      foamOn = !foamOn;
+      toggleButton(foamBtn, foamOn);
+      fetch(`/setFoam?state=${foamOn ? 'on' : 'off'}`).catch(() => {});
+    });
+
+    blackBtn.addEventListener('click', () => {
+      blackOn = !blackOn;
+      toggleButton(blackBtn, blackOn);
+      fetch(`/setBlackLights?state=${blackOn ? 'on' : 'off'}`).catch(() => {});
+    });
+  </script>
+</body>
+</html>
+      
+      )rawliteral");
   });
 
-  // API to control motor: /control?speed=0-255&dir=forward|backward
-  server.on("/control", HTTP_GET, [](AsyncWebServerRequest *request){
-    String speedStr = "0";
-    String dirStr = "forward";
+  // API routes
+  server.on("/setSpeed", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (request->hasParam("val")) {
+      motorSpeed = constrain(request->getParam("val")->value().toInt(), 0, 100);
+      updateMotor();
+      drawSpeedValue(motorSpeed);
+      drawSlider(motorSpeed);
+    }
+    request->send(200, "text/plain", "OK");
+  });
 
-    if(request->hasParam("speed")) speedStr = request->getParam("speed")->value();
-    if(request->hasParam("dir")) dirStr = request->getParam("dir")->value();
+  server.on("/setMotor", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (request->hasParam("state")) {
+      motorOn = (request->getParam("state")->value() == "on");
+      updateMotor();
+      drawPowerButton(motorOn);
+    }
+    request->send(200, "text/plain", "OK");
+  });
 
-    int speed = speedStr.toInt();
-    bool forward = dirStr.equalsIgnoreCase("forward");
 
-    handleMotorControl(speed, forward);
-
-    request->send(200, "application/json", "{\"status\":\"ok\"}");
+  server.on("/setFoam", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (request->hasParam("state")) {
+      foamMachineOn = (request->getParam("state")->value() == "on");
+      drawBottomButton(BTN_FOAM_X, foamMachineOn, "");
+    }
+    request->send(200, "text/plain", "OK");
+  });
+  server.on("/setBlackLights", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (request->hasParam("state")) {
+      blackLightsOn = (request->getParam("state")->value() == "on");
+      drawBottomButton(BTN_BLKL_X, blackLightsOn, "");
+    }
+    request->send(200, "text/plain", "OK");
   });
 
   server.begin();
+  Serial.println("HTTP server ready");
 }
 
-void drawLVGLGUI(){
-  lv_obj_t * scr = lv_scr_act();
 
-  // Background color black
-  lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), LV_PART_MAIN);
+unsigned long lastTouchTime = 0;
 
-  // Title label
-  lv_obj_t* title = lv_label_create(scr);
-  lv_label_set_text(title, "ESP32 Motor Control");
-  lv_obj_set_style_text_color(title, lv_color_hex(0x00BFA5), 0);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
-  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+void loop() {
 
-  // Speed label
-  speed_label = lv_label_create(scr);
-  lv_label_set_text_fmt(speed_label, "Speed: %d", motorSpeed);
-  lv_obj_set_style_text_color(speed_label, lv_color_hex(0xC8C8C8), 0);
-  lv_obj_set_style_text_font(speed_label, &lv_font_montserrat_16, 0);
-  lv_obj_align(speed_label, LV_ALIGN_TOP_LEFT, 10, 50);
+  if (touchscreen.tirqTouched() && touchscreen.touched()) {
 
-  // Speed slider
-  speed_slider = lv_slider_create(scr);
-  lv_slider_set_range(speed_slider, 0, 255);
-  lv_slider_set_value(speed_slider, motorSpeed, LV_ANIM_OFF);
-  lv_obj_set_width(speed_slider, 220);
-  lv_obj_align(speed_slider, LV_ALIGN_TOP_LEFT, 10, 75);
-  lv_obj_add_event_cb(speed_slider, slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  if (touchscreen.touched()) {
+    if (millis() - lastTouchTime < 200) return; // 200ms debounce
+    lastTouchTime = millis();
 
-  // Direction label
-  lv_obj_t* dir_label = lv_label_create(scr);
-  lv_label_set_text(dir_label, "Direction:");
-  lv_obj_set_style_text_color(dir_label, lv_color_hex(0xC8C8C8), 0);
-  lv_obj_set_style_text_font(dir_label, &lv_font_montserrat_16, 0);
-  lv_obj_align(dir_label, LV_ALIGN_TOP_LEFT, 10, 120);
+    TS_Point p = touchscreen.getPoint();
 
-  // Direction buttons container
-  lv_obj_t* btn_container = lv_obj_create(scr);
-  lv_obj_set_size(btn_container, 240, 50);
-  lv_obj_align(btn_container, LV_ALIGN_TOP_LEFT, 10, 145);
-  lv_obj_set_flex_flow(btn_container, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(btn_container, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_bg_color(btn_container, lv_color_black(), 0);
-  lv_obj_set_style_border_width(btn_container, 0, 0);
+    int x = map(p.x, 200, 3700, 1, tft.width() - 1);
+    int y = map(p.y, 240, 3800, 1, tft.height() - 1);
 
-  // Forward button
-  dir_forward_btn = lv_btn_create(btn_container);
-  lv_obj_set_size(dir_forward_btn, 100, 40);
-  lv_obj_add_state(dir_forward_btn, LV_STATE_CHECKED); // default forward
-  lv_obj_set_style_bg_color(dir_forward_btn, lv_color_hex(0x282828), 0);
-  lv_obj_set_style_bg_color(dir_forward_btn, lv_color_hex(0x00BFA5), LV_STATE_CHECKED);
-  lv_obj_set_style_border_color(dir_forward_btn, lv_color_hex(0x00BFA5), 0);
-  lv_obj_set_style_border_color(dir_forward_btn, lv_color_hex(0x00BFA5), LV_STATE_CHECKED);
-  lv_obj_set_style_border_width(dir_forward_btn, 2, 0);
-  lv_obj_set_style_border_width(dir_forward_btn, 2, LV_STATE_CHECKED);
-  lv_obj_add_event_cb(dir_forward_btn, dir_btn_event_cb, LV_EVENT_CLICKED, (void*)true);
+   // x = constrain(x, 0, tft.width() - 1);
+   // y = constrain(y, 0, tft.height() - 1);
 
-  lv_obj_t* f_label = lv_label_create(dir_forward_btn);
-  lv_label_set_text(f_label, "Forward");
-  lv_obj_center(f_label);
+    Serial.printf("Touch %d,%d\n", x, y);
 
-  // Backward button
-  dir_backward_btn = lv_btn_create(btn_container);
-  lv_obj_set_size(dir_backward_btn, 100, 40);
-  lv_obj_set_style_bg_color(dir_backward_btn, lv_color_hex(0x282828), 0);
-  lv_obj_set_style_bg_color(dir_backward_btn, lv_color_hex(0x00BFA5), LV_STATE_CHECKED);
-  lv_obj_set_style_border_color(dir_backward_btn, lv_color_hex(0x00BFA5), 0);
-  lv_obj_set_style_border_color(dir_backward_btn, lv_color_hex(0x00BFA5), LV_STATE_CHECKED);
-  lv_obj_set_style_border_width(dir_backward_btn, 2, 0);
-  lv_obj_set_style_border_width(dir_backward_btn, 2, LV_STATE_CHECKED);
-  lv_obj_add_event_cb(dir_backward_btn, dir_btn_event_cb, LV_EVENT_CLICKED, (void*)false);
+    // Instead of redrawing whole screen, just print touch detected
+    //tft.fillCircle(x, y, 5, TFT_RED);
 
-  lv_obj_t* b_label = lv_label_create(dir_backward_btn);
-  lv_label_set_text(b_label, "Backward");
-  lv_obj_center(b_label);
+    // Comment out or simplify handleTouch() to minimal toggle code and GUI update
+
+    handleTouch(x, y);
+    delay(200);
+  }
+}
+}
+//void loop() {
+
+  // Read IRQ pin state (active low means touched)
+//  bool irqState = digitalRead(TOUCH_IRQ) == LOW;
+//  Serial.printf("IRQ pin (touch detected): %d\n", irqState);
+//if (touchscreen.tirqTouched() && touchscreen.touched()) {
+//  if (irqState) {
+//    TS_Point p = touchscreen.getPoint();
+
+//    int x = map(p.y, 2000, 38000, 0, tft.width() - 1);
+//    int y = map(p.x, 2000, 38000, 0, tft.height() - 1);
+//    x = constrain(x, 0, tft.width()-1);
+//    y = constrain(y, 0, tft.height()-1);
+
+//    Serial.printf("Touch at %d,%d\n", x, y);
+
+//    handleTouch(x, y);
+//    delay(200);
+//  }
+
+//  delay(10);
+//}
+//}
+
+unsigned long lastUpdate = 0;
+const unsigned long updateInterval = 100; // ms
+
+void handleTouch(int x, int y) {
+
+  if (millis() - lastUpdate < updateInterval) return;
+  lastUpdate = millis();
+
+  // Power button circle
+  if (pointInCircle(x, y, BTN_POWER_X, BTN_POWER_Y, BTN_RADIUS)) {
+    motorOn = !motorOn;
+    updateMotor();
+    drawPowerButton(motorOn);
+    return;
+  }
+
+  // Slider control (horizontal bar)
+  if ((y >= SLIDER_Y) && (y <= SLIDER_Y + SLIDER_H) && (x >= SLIDER_X) && (x <= SLIDER_X + SLIDER_W)) {
+    motorSpeed = map(x, SLIDER_X, SLIDER_X + SLIDER_W, 0, 100);
+    motorSpeed = constrain(motorSpeed, 0, 100);
+    updateMotor();
+    drawSpeedValue(motorSpeed);
+    drawSlider(motorSpeed);
+    return;
+  }
+
+  // Bottom buttons rects
+
+  if (pointInRect(x, y, BTN_FOAM_X, BTN_BTNS_Y, BTN_BTN_W, BTN_BTN_H)) {
+    foamMachineOn = !foamMachineOn;
+    drawBottomButton(BTN_FOAM_X, foamMachineOn, "");
+    return;
+  }
+  if (pointInRect(x, y, BTN_BLKL_X, BTN_BTNS_Y, BTN_BTN_W, BTN_BTN_H)) {
+    blackLightsOn = !blackLightsOn;
+    drawBottomButton(BTN_BLKL_X, blackLightsOn, "");
+    return;
+  }
 }
 
-// LVGL slider event callback
-void slider_event_cb(lv_event_t * e) {
-  lv_obj_t * slider = (lv_obj_t *)lv_event_get_target(e);
-  int val = lv_slider_get_value(slider);
-
-  motorSpeed = val;
-  lv_label_set_text_fmt(speed_label, "Speed: %d", motorSpeed);
-  updateMotor();
+void drawGUI() {
+  tft.fillScreen(COLOR_BG);
+  drawPowerButton(motorOn);
+  drawTime();
+  drawTitle();
+  drawSpeedValue(motorSpeed);
+  drawSlider(motorSpeed);
+  drawBottomButton(BTN_FOAM_X, foamMachineOn, "");
+  drawBottomButton(BTN_BLKL_X, blackLightsOn, "");
 }
 
-// LVGL direction button event callback
-void dir_btn_event_cb(lv_event_t * e) {
-  lv_obj_t * btn = (lv_obj_t *)lv_event_get_target(e);
-  bool forward = (bool)lv_event_get_user_data(e);
+void drawPowerButton(bool on) {
+  uint16_t bg = on ? COLOR_GREEN : COLOR_RED;
+  tft.fillCircle(BTN_POWER_X, BTN_POWER_Y, BTN_RADIUS, bg);
+  tft.drawCircle(BTN_POWER_X, BTN_POWER_Y, BTN_RADIUS - 3, COLOR_TEXT_ACC);
+  tft.drawLine(BTN_POWER_X, BTN_POWER_Y - 15, BTN_POWER_X, BTN_POWER_Y + 5, COLOR_TEXT_ACC);
+  tft.drawCircle(BTN_POWER_X, BTN_POWER_Y + 5, 8, COLOR_TEXT_ACC);
+}
 
-  motorDirectionForward = forward;
-  updateMotor();
+void drawTime() {
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(FF17);
+  tft.setTextColor(COLOR_BTN_OFF);
+  tft.setTextSize(1);
+  IPAddress IP = WiFi.softAPIP(); 
+  String ipString = IP.toString();
+  tft.drawString(ipString, TIME_X, TIME_Y);
+}
 
-  // Update buttons states
-  if(forward){
-    lv_obj_add_state(dir_forward_btn, LV_STATE_CHECKED);
-    lv_obj_clear_state(dir_backward_btn, LV_STATE_CHECKED);
+void drawTitle() {
+ // tft.setFreeFont(FF19);
+  tft.setFreeFont(MYFONT32);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(COLOR_TEXT);
+  tft.setTextSize(1);
+  tft.drawString("Pump Speed", TITLE_X, TITLE_Y);
+}
+
+void drawSpeedValue(uint8_t speed) {
+  // Black rectangle
+  tft.fillRoundRect(SPEED_BOX_X, SPEED_BOX_Y, SPEED_BOX_W, SPEED_BOX_H, 10, COLOR_BLACK);
+  // Cyan speed text
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(FF31);
+  //tft.setTextColor(COLOR_ACCENT, COLOR_BLACK);
+  tft.setTextColor(COLOR_ACCENT);
+  tft.setTextSize(1);
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d%%", speed);
+  tft.drawString(buf, SPEED_BOX_X + SPEED_BOX_W / 2, SPEED_BOX_Y + SPEED_BOX_H / 2);
+}
+
+void drawSlider(uint8_t speed) {
+  // Slider background track (dark gray)
+  tft.fillRoundRect(SLIDER_X, SLIDER_Y, SLIDER_W, SLIDER_H, SLIDER_H / 2, COLOR_BTN_OFF);
+  // Filled portion track (cyan)
+  int fillWidth = (SLIDER_W * speed) / 100;
+  tft.fillRoundRect(SLIDER_X, SLIDER_Y, fillWidth, SLIDER_H, SLIDER_H / 2, COLOR_ACCENT);
+  // Circular knob
+  int knobX = SLIDER_X + fillWidth;
+  knobX = constrain(knobX, SLIDER_X + SLIDER_H / 2, SLIDER_X + SLIDER_W - SLIDER_H / 2);
+  tft.fillCircle(knobX, SLIDER_Y + SLIDER_H / 2, SLIDER_H / 2, COLOR_ACCENT);
+  tft.fillCircle(knobX, SLIDER_Y + SLIDER_H / 2, SLIDER_H / 2 - 3, COLOR_BG);
+}
+
+void drawBottomButton(int x, bool on, const char* label) {
+  uint16_t bg = on ? COLOR_ACCENT : COLOR_BTN_OFF;
+  uint16_t fg = on ? COLOR_BG : COLOR_TEXT;
+  tft.fillRoundRect(x, BTN_BTNS_Y, BTN_BTN_W, BTN_BTN_H, BTN_BTN_RADIUS, bg);
+
+  // Power icon
+  int cx = x + BTN_BTN_W / 2;
+  int cy = BTN_BTNS_Y + 15;
+  tft.drawCircle(cx, cy, 10, fg);
+  tft.drawLine(cx, cy - 10, cx, cy + 5, fg);
+
+  // Label
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(fg);
+  tft.setTextSize(2);
+  tft.drawString(label, cx, BTN_BTNS_Y + 40);
+}
+
+bool pointInCircle(int px, int py, int cx, int cy, int r) {
+  int dx = px - cx;
+  int dy = py - cy;
+  return (dx * dx + dy * dy) <= (r * r);
+}
+
+bool pointInRect(int px, int py, int rx, int ry, int w, int h) {
+  return (px >= rx && px <= rx + w && py >= ry && py <= ry + h);
+}
+
+void updateMotor() {
+  Serial.printf("Updating motor: motorOn=%d, speed=%d\n", motorOn, motorSpeed);
+  if (motorOn) {
+    digitalWrite(MOTOR_IN1_PIN, HIGH);
+    digitalWrite(MOTOR_IN2_PIN, LOW);
+    ledcWrite(0, map(motorSpeed, 0, 100, 0, 255));
   } else {
-    lv_obj_add_state(dir_backward_btn, LV_STATE_CHECKED);
-    lv_obj_clear_state(dir_forward_btn, LV_STATE_CHECKED);
+    digitalWrite(MOTOR_IN1_PIN, LOW);
+    digitalWrite(MOTOR_IN2_PIN, LOW);
+    ledcWrite(0, 0);
   }
 }
 
-// TFT_eSPI flush callback for LVGL
-void tft_flush_lvgl(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
-  uint32_t w = (area->x2 - area->x1 + 1);
-  uint32_t h = (area->y2 - area->y1 + 1);
-
-  tft.startWrite();
-  tft.setAddrWindow(area->x1, area->y1, w, h);
-  tft.pushColors(&color_p->full, w * h, true);
-  tft.endWrite();
-
-  lv_disp_flush_ready(disp);
-}
-
-// Touchpad read function for LVGL
-bool touchpad_read(lv_indev_drv_t * indev_driver, lv_indev_data_t * data) {
-  uint16_t touchX, touchY;
-
-  if (tft.getTouch(&touchX, &touchY)) {
-    data->state = LV_INDEV_STATE_PR;
-    data->point.x = touchX;
-    data->point.y = touchY;
-  } else {
-    data->state = LV_INDEV_STATE_REL;
-  }
-  return false;
-}
-
-// HTML webpage embedded as PROGMEM string - dark foamdisplay style
-const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ESP32 Motor Control</title>
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
-  body {
-    margin: 0; padding: 0;
-    background-color: #000000;
-    color: #c8c8c8;
-    font-family: 'Inter', sans-serif;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    height: 100vh;
-    justify-content: center;
-  }
-  h1 {
-    font-weight: 700;
-    margin-bottom: 1rem;
-    color: #00bfa5;
-  }
-  .slider-container {
-    width: 90vw;
-    max-width: 350px;
-    margin-bottom: 2rem;
-  }
-  .slider-label {
-    font-weight: 700;
-    margin-bottom: 0.5rem;
-  }
-  input[type=range] {
-    -webkit-appearance: none;
-    width: 100%;
-    height: 12px;
-    border-radius: 6px;
-    background: #282828;
-    outline: none;
-  }
-  input[type=range]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    background: #00bfa5;
-    cursor: pointer;
-    border: none;
-    margin-top: -8px;
-  }
-  input[type=range]::-moz-range-thumb {
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    background: #00bfa5;
-    cursor: pointer;
-    border: none;
-  }
-  .direction-container {
-    display: flex;
-    justify-content: center;
-    gap: 1rem;
-  }
-  .direction-button {
-    background-color: #282828;
-    border: 2px solid #c8c8c8;
-    color: #c8c8c8;
-    padding: 1rem 2rem;
-    border-radius: 12px;
-    font-weight: 700;
-    cursor: pointer;
-    user-select: none;
-    transition: background-color 0.3s, border-color 0.3s;
-  }
-  .direction-button.active {
-    background-color: #00bfa5;
-    border-color: #00bfa5;
-    color: #000;
-  }
-  .speed-display {
-    text-align: center;
-    font-size: 1.5rem;
-    margin-top: -1rem;
-    margin-bottom: 2rem;
-    font-weight: 700;
-  }
-</style>
-</head>
-<body>
-<h1>ESP32 Motor Control</h1>
-<div class="slider-container">
-  <label class="slider-label" for="speedRange">Speed</label>
-  <input type="range" min="0" max="255" value="0" id="speedRange" />
-  <div class="speed-display" id="speedValue">0</div>
-</div>
-<div class="direction-container">
-  <div id="forwardBtn" class="direction-button active">Forward</div>
-  <div id="backwardBtn" class="direction-button">Backward</div>
-</div>
-
-<script>
-  const speedRange = document.getElementById('speedRange');
-  const speedValue = document.getElementById('speedValue');
-  const forwardBtn = document.getElementById('forwardBtn');
-  const backwardBtn = document.getElementById('backwardBtn');
-
-  let currentSpeed = 0;
-  let currentDir = 'forward';
-
-  speedRange.oninput = function() {
-    currentSpeed = this.value;
-    speedValue.textContent = currentSpeed;
-    sendControl();
-  };
-
-  forwardBtn.onclick = function() {
-    if(currentDir !== 'forward'){
-      currentDir = 'forward';
-      forwardBtn.classList.add('active');
-      backwardBtn.classList.remove('active');
-      sendControl();
-    }
-  };
-
-  backwardBtn.onclick = function() {
-    if(currentDir !== 'backward'){
-      currentDir = 'backward';
-      backwardBtn.classList.add('active');
-      forwardBtn.classList.remove('active');
-      sendControl();
-    }
-  };
-
-  function sendControl(){
-    fetch(`/control?speed=${currentSpeed}&dir=${currentDir}`)
-    .then(response => response.json())
-    .then(data => {})
-    .catch(err => {
-      console.error('Error sending control:', err);
-    });
-  }
-</script>
-</body>
-</html>
-)rawliteral";
-
-String processor(const String& var){
-  return String();
-}
