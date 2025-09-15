@@ -6,9 +6,10 @@
 #include <XPT2046_Touchscreen.h>  // Touch controller
 #include "Free_Fonts.h" // Include the header file attached to this sketch
 #include "GlitchGoblin_2O87v20pt7b.h"
+#include <LittleFS.h>
 
 // Pin definitions — adjust as necessary for your wiring
-#define MOTOR_PWM_PIN 35
+#define MOTOR_PWM_PIN 22
 #define MOTOR_IN1_PIN 16
 #define MOTOR_IN2_PIN 17
 //#define BLOWER_PIN    17
@@ -70,9 +71,9 @@ AsyncWebSocket ws("/ws"); // <-- Websocket endpoint
 
 #define BTN_BLWR_X         40
 #define BTN_FOAM_X         40
-#define BTN_BLKL_X         220
+#define BTN_BLKL_X         115
 #define BTN_BTNS_Y         200
-#define BTN_BTN_W          70
+#define BTN_BTN_W          100
 #define BTN_BTN_H          50
 #define BTN_BTN_RADIUS     10
 
@@ -117,6 +118,12 @@ void notifyClients() {
 void setup() {
   Serial.begin(115200);
 
+// Initialize LittleFS
+  if(!LittleFS.begin()){
+    Serial.println("An Error has occurred while mounting LittleFS");
+    return;
+  }
+
   // Setup motor control pins and PWM channel 0
   pinMode(MOTOR_IN1_PIN, OUTPUT);
   pinMode(MOTOR_IN2_PIN, OUTPUT);
@@ -147,7 +154,7 @@ void setup() {
   Serial.println(WiFi.softAPIP());
   IPAddress IP = WiFi.softAPIP(); 
   drawGUI();
-
+server.serveStatic("/surgeFX.png", LittleFS, "/surgeFX.png");
   // Define web server routes
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     // Simple placeholder web GUI; please expand as needed
@@ -157,11 +164,11 @@ void setup() {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ESP32 Motor Control</title>
+  <title>SurgeFX Black Box Control</title>
   <style>
     body {
   margin: 0; padding: 20px;
-  background: #2f3b4d;
+  background: #222630;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
                Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
   color: #ccd6f6;
@@ -180,10 +187,12 @@ void setup() {
       display: flex;
       flex-direction: column;
       user-select: none;
+     
     }
     .top-bar {
       display: flex;
       justify-content: space-between;
+      
       align-items: center;
       margin-bottom: 12px;
     }
@@ -288,6 +297,12 @@ void setup() {
       stroke: currentColor;
       fill: none;
     }
+    img {
+	  margin:auto;
+	  display: block;
+	  width: 50%;
+    margin-bottom: 18px;
+	  }
     .btn.on {
       background-color: #00ffff;
       color: #000;
@@ -306,21 +321,24 @@ void setup() {
 </head>
 <body>
   <div class="card" role="main" aria-label="Pump control panel">
+    <img src="/surgeFX.png" alt="Pump Image">
     <div class="top-bar">
+    
       <button id="powerBtn" class="btn on" aria-pressed="true" aria-label="Motor power toggle" title="Power">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="5" x2="12" y2="12"/></svg>
       </button>
     </div>
     <h1>SurgeFX Pump Speed</h1>
+     
     <div class="speed-display" id="speedDisplay">0%</div>
     <input type="range" id="speedSlider" min="0" max="100" value="0" step="1" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Pump speed control" />
     <div class="buttons-row" role="group" aria-label="Control buttons">
-           
+     <!--      
       <button id="foamBtn" class="btn on" aria-pressed="true" aria-label="Foam toggle">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="5" x2="12" y2="12"/></svg>
         Foam
       </button>
-      
+      -->
       <button id="blackBtn" class="btn on" aria-pressed="true" aria-label="Black lights toggle">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="5" x2="12" y2="12"/></svg>
         Lights
@@ -349,7 +367,7 @@ void setup() {
       speedDisplay.textContent = `${data.motorSpeed}%`;
       speedSlider.value = data.motorSpeed;
       toggleButton(powerBtn, data.motorOn);
-      // toggleButton(blowerBtn, data.blowerOn); // Only if you support blower sync
+      toggleButton(blowerBtn, data.blowerOn); // Only if you support blower sync
       toggleButton(foamBtn, data.foamMachineOn);
       toggleButton(blackBtn, data.blackLightsOn);
     };
@@ -439,7 +457,7 @@ void setup() {
   server.on("/setBlackLights", HTTP_GET, [](AsyncWebServerRequest *request){
     if (request->hasParam("state")) {
       blackLightsOn = (request->getParam("state")->value() == "on");
-      drawBottomButton(BTN_BLKL_X, blackLightsOn, "");
+      drawBottomButton(BTN_BLKL_X, blackLightsOn, "ON");
       notifyClients(); // <-- Websocket broadcast
     }
     request->send(200, "text/plain", "OK");
@@ -455,6 +473,7 @@ void setup() {
 
 
 unsigned long lastTouchTime = 0;
+
 
 void loop() {
 
@@ -487,7 +506,7 @@ void handleTouch(int x, int y) {
   lastUpdate = millis();
 
   // Power button circle
-  if (pointInCircle(x, y, BTN_POWER_X, BTN_POWER_Y, BTN_RADIUS)) {
+  if (pointInCircle(x, y, BTN_POWER_X, BTN_POWER_Y, BTN_RADIUS + 2)) {
     motorOn = !motorOn;
     updateMotor();
     drawPowerButton(motorOn);
@@ -510,13 +529,13 @@ void handleTouch(int x, int y) {
 
   if (pointInRect(x, y, BTN_FOAM_X, BTN_BTNS_Y, BTN_BTN_W, BTN_BTN_H)) {
     foamMachineOn = !foamMachineOn;
-    drawBottomButton(BTN_FOAM_X, foamMachineOn, "");
+    //drawBottomButton(BTN_FOAM_X, foamMachineOn, "0");
     notifyClients(); // <-- Websocket broadcast
     return;
   }
   if (pointInRect(x, y, BTN_BLKL_X, BTN_BTNS_Y, BTN_BTN_W, BTN_BTN_H)) {
     blackLightsOn = !blackLightsOn;
-    drawBottomButton(BTN_BLKL_X, blackLightsOn, "");
+    drawBottomButton(BTN_BLKL_X, blackLightsOn, "Lights");
     notifyClients(); // <-- Websocket broadcast
     return;
   }
@@ -530,14 +549,16 @@ void drawGUI() {
   drawSpeedValue(motorSpeed);
   drawSlider(motorSpeed);
   tft.setTextSize(1);
-  drawBottomButton(BTN_FOAM_X, foamMachineOn, "");
-  drawBottomButton(BTN_BLKL_X, blackLightsOn, "");
+  //drawBottomButton(BTN_FOAM_X, foamMachineOn, "");
+  drawBottomButton(BTN_BLKL_X, blackLightsOn, "Lights");
 }
 
 void drawPowerButton(bool on) {
   uint16_t bg = on ? COLOR_GREEN : COLOR_RED;
   tft.fillCircle(BTN_POWER_X, BTN_POWER_Y, BTN_RADIUS, bg);
   tft.drawCircle(BTN_POWER_X, BTN_POWER_Y, BTN_RADIUS - 3, COLOR_TEXT_ACC);
+  tft.drawCircle(BTN_POWER_X, BTN_POWER_Y, BTN_RADIUS - 2, COLOR_TEXT_ACC);
+  tft.drawCircle(BTN_POWER_X, BTN_POWER_Y, BTN_RADIUS - 1, COLOR_TEXT_ACC);
   tft.drawLine(BTN_POWER_X, BTN_POWER_Y - 15, BTN_POWER_X, BTN_POWER_Y + 5, COLOR_TEXT_ACC);
   tft.drawCircle(BTN_POWER_X, BTN_POWER_Y + 5, 8, COLOR_TEXT_ACC);
 }
@@ -575,7 +596,7 @@ void drawSpeedValue(uint8_t speed) {
 
 void drawSlider(uint8_t speed) {
   // Slider background track (dark gray)
-  tft.fillRoundRect(SLIDER_X, SLIDER_Y, SLIDER_W, SLIDER_H, SLIDER_H / 2, COLOR_BTN_OFF);
+  tft.fillRoundRect(SLIDER_X, SLIDER_Y, SLIDER_W + 1, SLIDER_H + 1, SLIDER_H / 2, COLOR_BTN_OFF);
   // Filled portion track (cyan)
   int fillWidth = (SLIDER_W * speed) / 100;
   tft.fillRoundRect(SLIDER_X, SLIDER_Y, fillWidth, SLIDER_H, SLIDER_H / 2, COLOR_ACCENT);
@@ -593,13 +614,14 @@ void drawBottomButton(int x, bool on, const char* label) {
 
   // Power icon
   int cx = x + BTN_BTN_W / 2;
+  //int cx = x + BTN_BTN_W;
   int cy = BTN_BTNS_Y + 15;
-  tft.drawCircle(cx, cy, 10, fg);
-  tft.drawLine(cx, cy - 10, cx, cy + 5, fg);
+ // tft.drawCircle(cx, cy, 10, fg);
+ // tft.drawLine(cx, cy - 10, cx, cy + 5, fg);
 
   // Label
   tft.setTextDatum(MC_DATUM);
-  tft.setFreeFont(FF31);
+  tft.setFreeFont(FF30);
   tft.setTextColor(fg);
   tft.setTextSize(1);
   tft.drawString(label, cx, BTN_BTNS_Y + 10);
