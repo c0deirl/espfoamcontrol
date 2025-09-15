@@ -9,10 +9,10 @@
 #include <LittleFS.h>
 
 // Pin definitions — adjust as necessary for your wiring
-#define MOTOR_PWM_PIN 22
+#define MOTOR_PWM_PIN 27
 #define MOTOR_IN1_PIN 16
 #define MOTOR_IN2_PIN 17
-//#define BLOWER_PIN    17
+#define LIGHTS_PIN    22
 
 #define MYFONT32 &GlitchGoblin_2O87v20pt7b
 
@@ -127,6 +127,7 @@ void setup() {
   // Setup motor control pins and PWM channel 0
   pinMode(MOTOR_IN1_PIN, OUTPUT);
   pinMode(MOTOR_IN2_PIN, OUTPUT);
+  pinMode(LIGHTS_PIN, OUTPUT);
   ledcSetup(0, 20000, 8);  // 20 kHz, 8-bit
   ledcAttachPin(MOTOR_PWM_PIN, 0);
   pinMode(TOUCH_IRQ, INPUT_PULLUP);
@@ -367,8 +368,6 @@ server.serveStatic("/surgeFX.png", LittleFS, "/surgeFX.png");
       speedDisplay.textContent = `${data.motorSpeed}%`;
       speedSlider.value = data.motorSpeed;
       toggleButton(powerBtn, data.motorOn);
-      toggleButton(blowerBtn, data.blowerOn); // Only if you support blower sync
-      toggleButton(foamBtn, data.foamMachineOn);
       toggleButton(blackBtn, data.blackLightsOn);
     };
 
@@ -398,18 +397,6 @@ server.serveStatic("/surgeFX.png", LittleFS, "/surgeFX.png");
       motorOn = !motorOn;
       toggleButton(powerBtn, motorOn);
       fetch(`/setMotor?state=${motorOn ? 'on' : 'off'}`).catch(() => {});
-    });
-
-    blowerBtn.addEventListener('click', () => {
-      blowerOn = !blowerOn;
-      toggleButton(blowerBtn, blowerOn);
-      fetch(`/setBlower?state=${blowerOn ? 'on' : 'off'}`).catch(() => {});
-    });
-
-    foamBtn.addEventListener('click', () => {
-      foamOn = !foamOn;
-      toggleButton(foamBtn, foamOn);
-      fetch(`/setFoam?state=${foamOn ? 'on' : 'off'}`).catch(() => {});
     });
 
     blackBtn.addEventListener('click', () => {
@@ -457,8 +444,9 @@ server.serveStatic("/surgeFX.png", LittleFS, "/surgeFX.png");
   server.on("/setBlackLights", HTTP_GET, [](AsyncWebServerRequest *request){
     if (request->hasParam("state")) {
       blackLightsOn = (request->getParam("state")->value() == "on");
-      drawBottomButton(BTN_BLKL_X, blackLightsOn, "ON");
+      drawBottomButton(BTN_BLKL_X, blackLightsOn, "Lights");
       notifyClients(); // <-- Websocket broadcast
+      updateLights();
     }
     request->send(200, "text/plain", "OK");
   });
@@ -537,6 +525,7 @@ void handleTouch(int x, int y) {
     blackLightsOn = !blackLightsOn;
     drawBottomButton(BTN_BLKL_X, blackLightsOn, "Lights");
     notifyClients(); // <-- Websocket broadcast
+    updateLights();
     return;
   }
 }
@@ -644,8 +633,16 @@ void updateMotor() {
     digitalWrite(MOTOR_IN2_PIN, LOW);
     ledcWrite(0, map(motorSpeed, 0, 100, 0, 255));
   } else {
-    digitalWrite(MOTOR_IN1_PIN, LOW);
-    digitalWrite(MOTOR_IN2_PIN, LOW);
+    digitalWrite(MOTOR_IN1_PIN, HIGH);
+    digitalWrite(MOTOR_IN2_PIN, HIGH);
     ledcWrite(0, 0);
+  }
+}
+void updateLights() {
+  Serial.printf("Updating lights:");
+  if (blackLightsOn) {
+    digitalWrite(LIGHTS_PIN, HIGH);
+  } else {
+    digitalWrite(LIGHTS_PIN, LOW);
   }
 }
